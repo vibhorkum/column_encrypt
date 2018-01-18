@@ -89,3 +89,4 @@ test=# select * from secure_data;
   3 | \x0100002ffb04d15227b9f72431ab507c313a
 (3 rows)
 ```
+
