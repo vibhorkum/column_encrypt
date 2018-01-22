@@ -677,7 +677,7 @@ Datum enc_store_key_detail(PG_FUNCTION_ARGS)
     /* set current key information */
     current_key_detail = create_key_detail(key, algorithm);
 
-    PG_RETURN_BOOL(TRUE);
+    PG_RETURN_BOOL(true);
 }
 
 /*
@@ -700,7 +700,7 @@ Datum enc_store_previous_key_detail(PG_FUNCTION_ARGS)
     /* set old key information */
     previous_key_detail = create_key_detail(key, algorithm);
 
-    PG_RETURN_BOOL(TRUE);
+    PG_RETURN_BOOL(true);
 }
 
 
@@ -713,9 +713,9 @@ Datum enc_remove_key_detail(PG_FUNCTION_ARGS)
 {
     if(remove_key_detail(current_key_detail)){
         current_key_detail = NULL;
-        PG_RETURN_BOOL(TRUE);
+        PG_RETURN_BOOL(true);
     }
-    PG_RETURN_BOOL(FALSE);
+    PG_RETURN_BOOL(false);
 }
 
 
@@ -731,9 +731,9 @@ Datum enc_drop_previous_key_detail(PG_FUNCTION_ARGS)
 {
     if(remove_key_detail(previous_key_detail)){
         previous_key_detail = NULL;
-        PG_RETURN_BOOL(TRUE);
+        PG_RETURN_BOOL(true);
     }
-    PG_RETURN_BOOL(FALSE);
+    PG_RETURN_BOOL(false);
 }
 
 /*
@@ -760,21 +760,21 @@ Datum enc_rename_backupfile(PG_FUNCTION_ARGS)
             /* remove older backup */
             if (remove(old_filepath) != 0) {
                 /* returns false if removing older backcup is failed */
-                PG_RETURN_BOOL(FALSE);
+                PG_RETURN_BOOL(false);
             }
         }
 
         /* rename backup file */
         if (rename(new_filepath, old_filepath) != 0) {
             /* returns false if renaming arg0 to arg1 is failed */
-            PG_RETURN_BOOL(FALSE);
+            PG_RETURN_BOOL(false);
         }
     }
 
     pfree(new_filepath);
     pfree(old_filepath);
 
-    PG_RETURN_BOOL(TRUE);
+    PG_RETURN_BOOL(true);
 
 }
 
