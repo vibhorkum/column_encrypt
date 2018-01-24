@@ -1,9 +1,14 @@
-/* contrib/column_encryption/column_encryption--1.0.sql */
+/* share/extension/column_encryption--1.0.sql */
 
  -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 
 \echo Use "CREATE EXTENSION column_encryption" to load this file. \quit
 
+SET check_function_bodies TO off;
+
+--
+-- Ensure we are loading recent functions
+--
 DROP TABLE IF EXISTS public.cipher_key_table;
 DROP OPERATOR CLASS IF EXISTS public.hash_text_enc_ops USING hash;
 DROP OPERATOR FAMILY IF EXISTS public.hash_text_enc_ops USING hash;
@@ -12,220 +17,355 @@ DROP OPERATOR FAMILY IF EXISTS public.hash_bytea_enc_ops USING hash;
 DROP OPERATOR IF EXISTS public.= (encrypted_bytea, encrypted_bytea);
 DROP OPERATOR IF EXISTS public.= (encrypted_text, encrypted_text);
 DROP FUNCTION IF EXISTS public.regclass(encrypted_text);
-DROP FUNCTION IF EXISTS public.remove_key_details();
-DROP FUNCTION IF EXISTS public.load_key_details(text);
-DROP FUNCTION IF EXISTS public.pg_stat_actv_mask();
+DROP FUNCTION IF EXISTS public.rm_key_details();
+DROP FUNCTION IF EXISTS public.load_key(text);
+DROP FUNCTION IF EXISTS public.pgstat_actv_mask();
 DROP FUNCTION IF EXISTS public.enctext(xml);
 DROP FUNCTION IF EXISTS public.enctext(inet);
 DROP FUNCTION IF EXISTS public.enctext(character);
 DROP FUNCTION IF EXISTS public.enctext(boolean);
-DROP FUNCTION IF EXISTS public.enc_store_previous_key_detail(text, text);
-DROP FUNCTION IF EXISTS public.enc_store_key_detail(text, text);
-DROP FUNCTION IF EXISTS public.enc_rename_backupfile(text, text);
+DROP FUNCTION IF EXISTS public.enc_store_prv_key(text, text);
+DROP FUNCTION IF EXISTS public.enc_store_key(text, text);
 DROP FUNCTION IF EXISTS public.enc_hash_enctext(encrypted_text);
 DROP FUNCTION IF EXISTS public.enc_hash_encbytea(encrypted_bytea);
-DROP FUNCTION IF EXISTS public.enc_drop_previous_key_detail();
-DROP FUNCTION IF EXISTS public.enc_remove_key_detail();
-DROP FUNCTION IF EXISTS public.column_enc_comp_eq_text(encrypted_text, encrypted_text);
-DROP FUNCTION IF EXISTS public.column_enc_comp_eq_bytea(encrypted_bytea, encrypted_bytea);
-DROP FUNCTION IF EXISTS public.cipher_key_regist(text, text, text);
+DROP FUNCTION IF EXISTS public.enc_rm_prv_key();
+DROP FUNCTION IF EXISTS public.enc_rm_key();
+DROP FUNCTION IF EXISTS public.col_enc_comp_eq_text(encrypted_text, encrypted_text);
+DROP FUNCTION IF EXISTS public.col_enc_comp_eq_bytea(encrypted_bytea, encrypted_bytea);
+DROP FUNCTION IF EXISTS public.register_cipher_key(text, text, text);
 DROP FUNCTION IF EXISTS public.cipher_key_reencrypt_data(text, text, text);
 DROP FUNCTION IF EXISTS public.cipher_key_enable_log();
 DROP FUNCTION IF EXISTS public.cipher_key_disable_log();
-DROP FUNCTION IF EXISTS public.cipher_key_backup();
 DROP TYPE IF EXISTS public.encrypted_text CASCADE;
-DROP FUNCTION IF EXISTS public.column_enc_send(encrypted_text);
-DROP FUNCTION IF EXISTS public.column_enc_recv(internal);
-DROP FUNCTION IF EXISTS public.column_enc_text_out(encrypted_text);
-DROP FUNCTION IF EXISTS public.column_enc_text_in(cstring);
+DROP FUNCTION IF EXISTS public.col_enc_send(encrypted_text);
+DROP FUNCTION IF EXISTS public.col_enc_recv(internal);
+DROP FUNCTION IF EXISTS public.col_enc_text_out(encrypted_text);
+DROP FUNCTION IF EXISTS public.col_enc_text_in(cstring);
 DROP TYPE IF EXISTS public.encrypted_bytea CASCADE;
-DROP FUNCTION IF EXISTS public.column_enc_send(encrypted_bytea);
-DROP FUNCTION IF EXISTS public.column_enc_recv(internal);
-DROP FUNCTION IF EXISTS public.column_enc_bytea_out(encrypted_bytea);
-DROP FUNCTION IF EXISTS public.column_enc_bytea_in(cstring);
---
--- Name: public; Type: SCHEMA; Schema: -; Owner: enterprisedb
---
+DROP FUNCTION IF EXISTS public.col_enc_send(encrypted_bytea);
+DROP FUNCTION IF EXISTS public.col_enc_recv(internal);
+DROP FUNCTION IF EXISTS public.col_enc_bytea_out(encrypted_bytea);
+DROP FUNCTION IF EXISTS public.col_enc_bytea_in(cstring);
 
---
--- Name: encrypted_bytea; Type: SHELL TYPE; Schema: public; Owner: enterprisedb
---
+/*
+ * Create encrypted types
+ */
 
 CREATE TYPE encrypted_bytea;
+CREATE TYPE encrypted_text;
 
+/*
+ * input function for encrypted bytea
+ */
 
---
--- Name: column_enc_bytea_in(cstring); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION column_enc_bytea_in(cstring) RETURNS encrypted_bytea
+CREATE FUNCTION col_enc_bytea_in(cstring) RETURNS encrypted_bytea
     LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'column_enc_bytea_in';
+    AS 'column_encryption', 'col_enc_bytea_in';
 
+/*
+ * Output function for encrypted bytea
+ */
 
-
---
--- Name: column_enc_bytea_out(encrypted_bytea); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION column_enc_bytea_out(encrypted_bytea) RETURNS cstring
+CREATE FUNCTION col_enc_bytea_out(encrypted_bytea) RETURNS cstring
     LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'column_enc_bytea_out';
+    AS 'column_encryption', 'col_enc_bytea_out';
 
+/*
+ * Define recv function for encrypted bytea
+ */
 
-
---
--- Name: column_enc_recv(internal); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION column_enc_recv_bytea(internal) RETURNS encrypted_bytea
+CREATE FUNCTION col_enc_recv_bytea(internal) RETURNS encrypted_bytea
     LANGUAGE c IMMUTABLE STRICT
-    AS 'column_encryption', 'column_enc_recv';
+    AS 'column_encryption', 'col_enc_recv';
 
+/*
+ * Define send function for encrypted bytea
+ */
 
-
---
--- Name: column_enc_send(encrypted_bytea); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION column_enc_send_bytea(encrypted_bytea) RETURNS bytea
+CREATE FUNCTION col_enc_send_bytea(encrypted_bytea) RETURNS bytea
     LANGUAGE c IMMUTABLE STRICT
-    AS 'column_encryption', 'column_enc_send';
+    AS 'column_encryption', 'col_enc_send';
 
-
-
---
--- Name: encrypted_bytea; Type: TYPE; Schema: public; Owner: enterprisedb
---
+/*
+ * Define encrypted_bytea data type
+ */
 
 CREATE TYPE encrypted_bytea (
     INTERNALLENGTH = variable,
-    INPUT = column_enc_bytea_in,
-    OUTPUT = column_enc_bytea_out,
-    RECEIVE = column_enc_recv_bytea,
-    SEND = column_enc_send_bytea,
+    INPUT = col_enc_bytea_in,
+    OUTPUT = col_enc_bytea_out,
+    RECEIVE = col_enc_recv_bytea,
+    SEND = col_enc_send_bytea,
     ALIGNMENT = int4,
     STORAGE = extended
 );
 
+/*
+ * Input function for encrypted_text
+ */
 
-
---
--- Name: encrypted_text; Type: SHELL TYPE; Schema: public; Owner: enterprisedb
---
-
-CREATE TYPE encrypted_text;
-
-
---
--- Name: column_enc_text_in(cstring); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION column_enc_text_in(cstring) RETURNS encrypted_text
+CREATE FUNCTION col_enc_text_in(cstring) RETURNS encrypted_text
     LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'column_enc_text_in';
+    AS 'column_encryption', 'col_enc_text_in';
 
+/*
+ * Output function for encrypted_text
+ */
 
-
---
--- Name: column_enc_text_out(encrypted_text); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION column_enc_text_out(encrypted_text) RETURNS cstring
+CREATE FUNCTION col_enc_text_out(encrypted_text) RETURNS cstring
     LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'column_enc_text_out';
+    AS 'column_encryption', 'col_enc_text_out';
 
 
+/*
+ * Define recv function for encrypted text
+ */
 
---
--- Name: column_enc_recv(internal); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION column_enc_recv_text(internal) RETURNS encrypted_text
+CREATE FUNCTION col_enc_recv_text(internal) RETURNS encrypted_text
     LANGUAGE c IMMUTABLE STRICT
-    AS 'column_encryption', 'column_enc_recv';
+    AS 'column_encryption', 'col_enc_recv';
 
+/*
+ * Define send function for encrypted text
+ */
 
-
---
--- Name: column_enc_send(encrypted_text); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION column_enc_send_text(encrypted_text) RETURNS bytea
+CREATE FUNCTION col_enc_send_text(encrypted_text) RETURNS bytea
     LANGUAGE c IMMUTABLE STRICT
-    AS 'column_encryption', 'column_enc_send';
+    AS 'column_encryption', 'col_enc_send';
 
-
-
---
--- Name: encrypted_text; Type: TYPE; Schema: public; Owner: enterprisedb
---
-
+/*
+ * Define encrypted text data type
+ */
 CREATE TYPE encrypted_text (
     INTERNALLENGTH = variable,
-    INPUT = column_enc_text_in,
-    OUTPUT = column_enc_text_out,
-    RECEIVE = column_enc_recv_text,
-    SEND = column_enc_send_text,
+    INPUT = col_enc_text_in,
+    OUTPUT = col_enc_text_out,
+    RECEIVE = col_enc_recv_text,
+    SEND = col_enc_send_text,
     CATEGORY = 'S',
     ALIGNMENT = int4,
     STORAGE = extended
 );
 
 
+/*
+ * index operator for encrypted binary type
+ */
 
---
--- Name: cipher_key_backup(); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION cipher_key_backup() RETURNS boolean
-    LANGUAGE plpgsql
-    SET search_path TO public
-    AS $$
-
-DECLARE
-	f_filepath TEXT;	/* path of backupfile */
-	f_old_filepath TEXT;	/* old backupfile */
-	f_query TEXT;		/* dynamic SQL */
-	f_dbname TEXT;		/* current dbname */
-	result BOOLEAN;
-
-BEGIN
-	/* get path of backup file from column_encrypt.backup_dir */
-	SELECT setting INTO f_filepath FROM pg_settings WHERE name = 'column_encrypt.backup_dir';
-
-	/* if column_encrypt.backup_dir is not set, get value of data_directory */
-	IF(f_filepath = '')THEN
-		SELECT setting INTO f_filepath FROM pg_settings WHERE name = 'data_directory';
-
-		IF f_filepath IS NULL THEN
-			RAISE EXCEPTION 'EDB-ENC0014 could not get data directory path';
-		END IF;
-	END IF;
-
-	/* get name of current db */
-	SELECT current_database() INTO f_dbname;
-
-	/* set filename of backup */
-	f_filepath := f_filepath || E'/enc_backup_' || f_dbname;
-	f_old_filepath := f_filepath;
-
-	/* rename if "ck_backup" is already exists */
-	SELECT enc_rename_backupfile(f_filepath, f_old_filepath) INTO result;
-
-	IF result = FALSE THEN
-		RAISE EXCEPTION 'EDB-ENC0015 could not rename old backup file of cipher key';
-	END IF;
-
-	/* backup current encryption key table */
-	f_query := 'COPY cipher_key_table TO ''' || f_filepath || ''' BINARY';
-	EXECUTE f_query;
-
-	RETURN result;
-END;
-$$;
+CREATE FUNCTION col_enc_comp_eq_bytea(encrypted_bytea, encrypted_bytea) RETURNS boolean
+LANGUAGE c STABLE STRICT
+AS 'column_encryption', 'col_enc_comp_eq_bytea';
 
 
+/*
+ * index operator for encrypted text type
+ */
+
+CREATE FUNCTION col_enc_comp_eq_text(encrypted_text, encrypted_text) RETURNS boolean
+LANGUAGE c STABLE STRICT
+AS 'column_encryption', 'col_enc_comp_eq_text';
+
+
+/*
+ * define index operator for encrypted
+ * text
+ */
+
+CREATE OPERATOR = (
+PROCEDURE = col_enc_comp_eq_text,
+LEFTARG = encrypted_text,
+RIGHTARG = encrypted_text,
+RESTRICT = eqsel,
+JOIN = eqjoinsel
+);
+
+
+/*
+ * define index operator for encrypted
+ * bytea
+ */
+
+CREATE OPERATOR = (
+PROCEDURE = col_enc_comp_eq_bytea,
+LEFTARG = encrypted_bytea,
+RIGHTARG = encrypted_bytea,
+RESTRICT = eqsel,
+JOIN = eqjoinsel
+);
+
+/*
+ * Hash function for encrypted bytea
+ */
+
+CREATE FUNCTION enc_hash_encbytea(encrypted_bytea) RETURNS integer
+LANGUAGE c IMMUTABLE STRICT
+AS 'column_encryption', 'enc_hash_encrted_data';
+
+/*
+ * hash function for encrypted text
+ */
+CREATE FUNCTION enc_hash_enctext(encrypted_text) RETURNS integer
+LANGUAGE c IMMUTABLE STRICT
+AS 'column_encryption', 'enc_hash_encrted_data';
+
+
+/*
+ * define hash index for encrypted binary
+ */
+
+CREATE OPERATOR FAMILY hash_bytea_enc_ops USING hash;
+
+CREATE OPERATOR CLASS hash_bytea_enc_ops
+DEFAULT FOR TYPE encrypted_bytea USING hash FAMILY hash_bytea_enc_ops AS
+OPERATOR 1 =(encrypted_bytea,encrypted_bytea) ,
+FUNCTION 1 (encrypted_bytea, encrypted_bytea) enc_hash_encbytea(encrypted_bytea);
+
+/*
+ * define hash index for encrypted text
+ */
+
+CREATE OPERATOR FAMILY hash_text_enc_ops USING hash;
+
+CREATE OPERATOR CLASS hash_text_enc_ops
+DEFAULT FOR TYPE encrypted_text USING hash FAMILY hash_text_enc_ops AS
+OPERATOR 1 =(encrypted_text,encrypted_text) ,
+FUNCTION 1 (encrypted_text, encrypted_text) enc_hash_enctext(encrypted_text);
+
+/*
+ * Define cast functions for encrypted type column
+ */
+
+CREATE FUNCTION enctext(boolean) RETURNS encrypted_text
+LANGUAGE c STRICT
+AS 'column_encryption', 'bool_enc_text';
+
+CREATE FUNCTION enctext(character) RETURNS encrypted_text
+LANGUAGE c STABLE STRICT
+AS 'column_encryption', 'enc_text_trim';
+
+
+CREATE FUNCTION enctext(inet) RETURNS encrypted_text
+LANGUAGE c STABLE STRICT
+AS 'column_encryption', 'inet_enc_text';
+
+
+CREATE FUNCTION enctext(xml) RETURNS encrypted_text
+LANGUAGE c STABLE STRICT
+AS 'column_encryption', 'xml_enc_text';
+
+CREATE FUNCTION regclass(encrypted_text) RETURNS regclass
+LANGUAGE c STABLE STRICT
+AS 'column_encryption', 'enc_text_regclass';
+
+/*
+ * encrypted text -> text
+ */
+
+CREATE CAST (encrypted_text AS text)
+WITH INOUT AS IMPLICIT;
+
+/*
+ * text -> encrypted text
+ */
+
+CREATE CAST (text AS encrypted_text)
+WITH INOUT AS IMPLICIT;
+
+/*
+ * boolean -> encrypted text
+ */
+
+CREATE CAST (boolean AS encrypted_text)
+WITH FUNCTION enctext(boolean)
+AS ASSIGNMENT;
+
+/*
+ * character -> encrypted text
+ */
+
+CREATE CAST (character AS encrypted_text)
+WITH FUNCTION enctext(character)
+AS ASSIGNMENT;
+
+/*
+ * cidr -> encrypted text
+ */
+
+CREATE CAST (cidr AS encrypted_text)
+WITH FUNCTION enctext(inet)
+AS ASSIGNMENT;
+
+/*
+ * inet -> encrypted text
+ */
+
+CREATE CAST (inet AS encrypted_text)
+WITH FUNCTION enctext(inet)
+AS ASSIGNMENT;
+
+/*
+ * xml -> encrypted text
+ */
+
+CREATE CAST (xml AS encrypted_text)
+WITH FUNCTION enctext(xml)
+AS ASSIGNMENT;
+
+/*
+ * encrypted text -> regclass
+ */
+
+CREATE CAST (encrypted_text AS regclass)
+WITH FUNCTION regclass(encrypted_text)
+AS ASSIGNMENT;
+
+/*
+ * binary -> encrypted binary
+ */
+
+CREATE CAST (encrypted_bytea AS bytea)
+WITH INOUT
+AS IMPLICIT;
+
+/*
+ * encrypted binary -> binary
+ */
+CREATE CAST (bytea AS encrypted_bytea)
+WITH INOUT
+AS ASSIGNMENT;
+
+/*
+ * define table for managing encryption key
+ */
+
+CREATE TABLE cipher_key_table (
+key bytea,
+algorithm text
+);
+
+CREATE INDEX algo_idx ON cipher_key_table(algorithm);
+
+
+
+/*
+ * Function descriptions:
+ * 1. cipher_key_disable_log:
+ *      Function for log redaction of INSERT/UPDATE/DELETE/function calls
+ *      Arguments - No arguments
+ *      Returns - boolean (true/false)
+ *
+ * 2. cipher_key_enable_log:
+ *      Function for enabling the logging of statements in postgresql logs
+ *      Arguments - No Argument
+ *      Returns - boolean (true/false)
+ *
+ * 3. cipher_key_reencrypt_data:
+ *      Function to change the key and re-encrypt the encrypted column data
+ *      Arguments - re-encrypt specified data periodically using encryption
+ *          key which is specified custom parameter
+ *      @return true if re-encryption is successfully done
+
+*/
 
 --
 -- Name: cipher_key_disable_log(); Type: FUNCTION; Schema: public; Owner: enterprisedb
@@ -242,12 +382,11 @@ DECLARE
 BEGIN
 
 	SET track_activities = off;
-	SET column_encrypt.mask_key_log = on;
+	SET encrypt.enable = on;
 	RETURN TRUE;
 
 END;
 $$;
-
 
 
 --
@@ -265,12 +404,11 @@ DECLARE
 BEGIN
 
 	SET track_activities = DEFAULT;
-	SET column_encrypt.mask_key_log = off;
+	SET encrypt.enable = off;
 	RETURN TRUE;
 
 END;
 $$;
-
 
 
 --
@@ -315,9 +453,9 @@ BEGIN
 	SET LOCAL encrypt.noversionerror TO on;
 	
 	/* set new key to memory */
-	PERFORM load_key_details(new_cipher_key);
+	PERFORM load_key(new_cipher_key);
 	/* set old key to memory */
-	PERFORM enc_store_previous_key_detail(old_cipher_key, old_cipher_algorithm);
+	PERFORM enc_store_prv_key(old_cipher_key, old_cipher_algorithm);
 
 	/* store column of user defined table */
 	OPEN
@@ -383,21 +521,20 @@ BEGIN
 	CLOSE f_cu;
 	
 	/* delete old key from memory */
-	PERFORM enc_drop_previous_key_detail();
+	PERFORM enc_rm_prv_key();
 	/* drop key from memory */
-	PERFORM remove_key_details();
+	PERFORM rm_key_details();
 
 	RETURN TRUE;
 END;
 $_$;
 
 
-
 --
--- Name: cipher_key_regist(text, text, text, text); Type: FUNCTION; Schema: public; Owner: enterprisedb
+-- Name: register_cipher_key(text, text, text, text); Type: FUNCTION;
 --
 
-CREATE FUNCTION cipher_key_regist(text, text, text) RETURNS integer
+CREATE FUNCTION register_cipher_key(text, text, text) RETURNS integer
     LANGUAGE plpgsql
     AS $_$
 
@@ -413,10 +550,10 @@ DECLARE
 
 BEGIN
 	/* mask pg_stat_activity's query */
-	PERFORM pg_stat_actv_mask();
+	PERFORM pgstat_actv_mask();
 
 	/* if cipher_key_disable_log is not yet executed, output an error */
-	IF (SELECT setting FROM pg_settings WHERE name = 'column_encrypt.mask_key_log') != 'on' THEN
+	IF (SELECT setting FROM pg_settings WHERE name = 'encrypt.enable') != 'on' THEN
 		RAISE EXCEPTION 'EDB-ENC0036 you must call cipher_key_disable_log function first.';
 	END IF;
 
@@ -460,9 +597,7 @@ BEGIN
 	
 	/* encrypt and register new key */
 	INSERT INTO cipher_key_table(key, algorithm) VALUES(pgp_sym_encrypt(cipher_key, cipher_key, 'cipher-algo=aes256, s2k-mode=1'), cipher_algorithm);
-	
-	/* backup encryption key table */
-	PERFORM cipher_key_backup();
+
 	/* reencrypt all data */
 	IF f_key_num = 1 THEN
 		PERFORM cipher_key_reencrypt_data(current_cipher_key, current_cipher_algorithm, cipher_key);
@@ -474,146 +609,58 @@ END;
 $_$;
 
 
-
 --
--- Name: column_enc_comp_eq_bytea(encrypted_bytea, encrypted_bytea); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION column_enc_comp_eq_bytea(encrypted_bytea, encrypted_bytea) RETURNS boolean
-    LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'column_enc_comp_eq_bytea';
-
-
-
---
--- Name: column_enc_comp_eq_text(encrypted_text, encrypted_text); Type: FUNCTION; Schema: public; Owner: enterprisedb
+-- Name: enc_rm_key(); Type: FUNCTION; Schema: public; Owner: enterprisedb
 --
 
-CREATE FUNCTION column_enc_comp_eq_text(encrypted_text, encrypted_text) RETURNS boolean
-    LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'column_enc_comp_eq_text';
-
-
-
---
--- Name: enc_remove_key_detail(); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION enc_remove_key_detail() RETURNS boolean
+CREATE FUNCTION enc_rm_key() RETURNS boolean
     LANGUAGE c STRICT
-    AS 'column_encryption', 'enc_remove_key_detail';
+    AS 'column_encryption', 'enc_rm_key';
 
 --
--- Name: enc_drop_previous_key_detail(); Type: FUNCTION; Schema: public; Owner: enterprisedb
+-- Name: enc_rm_prv_key(); Type: FUNCTION; Schema: public; Owner: enterprisedb
 --
 
-CREATE FUNCTION enc_drop_previous_key_detail() RETURNS boolean
+CREATE FUNCTION enc_rm_prv_key() RETURNS boolean
     LANGUAGE c STRICT
-    AS 'column_encryption', 'enc_drop_previous_key_detail';
-
---
--- Name: enc_hash_encbytea(encrypted_bytea); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION enc_hash_encbytea(encrypted_bytea) RETURNS integer
-    LANGUAGE c IMMUTABLE STRICT
-    AS 'column_encryption', 'enc_hash_encrted_data';
-
---
--- Name: enc_hash_enctext(encrypted_text); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION enc_hash_enctext(encrypted_text) RETURNS integer
-    LANGUAGE c IMMUTABLE STRICT
-    AS 'column_encryption', 'enc_hash_encrted_data';
+    AS 'column_encryption', 'enc_rm_prv_key';
 
 
 
 --
--- Name: enc_rename_backupfile(text, text); Type: FUNCTION; Schema: public; Owner: enterprisedb
+-- Name: enc_store_key(text, text); Type: FUNCTION; Schema: public; Owner: enterprisedb
 --
 
-CREATE FUNCTION enc_rename_backupfile(text, text) RETURNS boolean
+CREATE FUNCTION enc_store_key(text, text) RETURNS boolean
     LANGUAGE c STRICT
-    AS 'column_encryption', 'enc_rename_backupfile';
+    AS 'column_encryption', 'enc_store_key';
 
 
 
 --
--- Name: enc_store_key_detail(text, text); Type: FUNCTION; Schema: public; Owner: enterprisedb
+-- Name: enc_store_prv_key(text, text); Type: FUNCTION; Schema: public; Owner: enterprisedb
 --
 
-CREATE FUNCTION enc_store_key_detail(text, text) RETURNS boolean
+CREATE FUNCTION enc_store_prv_key(text, text) RETURNS boolean
     LANGUAGE c STRICT
-    AS 'column_encryption', 'enc_store_key_detail';
-
-
-
---
--- Name: enc_store_previous_key_detail(text, text); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION enc_store_previous_key_detail(text, text) RETURNS boolean
-    LANGUAGE c STRICT
-    AS 'column_encryption', 'enc_store_previous_key_detail';
-
+    AS 'column_encryption', 'enc_store_prv_key';
 
 
 --
--- Name: enctext(boolean); Type: FUNCTION; Schema: public; Owner: enterprisedb
+-- Name: pgstat_actv_mask(); Type: FUNCTION; Schema: public; Owner: enterprisedb
 --
 
-CREATE FUNCTION enctext(boolean) RETURNS encrypted_text
-    LANGUAGE c STRICT
-    AS 'column_encryption', 'bool_enc_text';
-
-
-
---
--- Name: enctext(character); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION enctext(character) RETURNS encrypted_text
+CREATE FUNCTION pgstat_actv_mask() RETURNS void
     LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'enc_text_trim';
+    AS 'column_encryption', 'pgstat_actv_mask';
 
 
 
 --
--- Name: enctext(inet); Type: FUNCTION; Schema: public; Owner: enterprisedb
+-- Name: load_key(text); Type: FUNCTION; Schema: public; Owner: enterprisedb
 --
 
-CREATE FUNCTION enctext(inet) RETURNS encrypted_text
-    LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'inet_enc_text';
-
-
-
---
--- Name: enctext(xml); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION enctext(xml) RETURNS encrypted_text
-    LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'xml_enc_text';
-
-
-
---
--- Name: pg_stat_actv_mask(); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION pg_stat_actv_mask() RETURNS void
-    LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'pg_stat_actv_mask';
-
-
-
---
--- Name: load_key_details(text); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION load_key_details(text) RETURNS boolean
+CREATE FUNCTION load_key(text) RETURNS boolean
     LANGUAGE plpgsql
     SET search_path TO public
     AS $_$
@@ -627,17 +674,17 @@ DECLARE
 
 BEGIN
 	/* mask pg_stat_activity's query */
-	PERFORM pg_stat_actv_mask();
+	PERFORM pgstat_actv_mask();
 
 	/* if cipher_key_disable_log is not yet executed, output an error */
-	IF (SELECT setting FROM pg_settings WHERE name = 'column_encrypt.mask_key_log') != 'on' THEN
+	IF (SELECT setting FROM pg_settings WHERE name = 'encrypt.enable') != 'on' THEN
 		RAISE EXCEPTION 'EDB-ENC0036 you must call cipher_key_disable_log function first.';
 	END IF;
 
 	/* drop encryption key information in memory */
-	PERFORM enc_remove_key_detail();
+	PERFORM enc_rm_key();
 	/* drop old-encryption key information in memory */
-	PERFORM enc_drop_previous_key_detail();
+	PERFORM enc_rm_prv_key();
 
 	IF cipher_key IS NOT NULL THEN
 		/* get number of registered encryption key */
@@ -652,11 +699,11 @@ BEGIN
 
 		BEGIN
 			/* load encryption key table to memory */
-			PERFORM enc_store_key_detail(pgp_sym_decrypt(key, cipher_key), algorithm)
+			PERFORM enc_store_key(pgp_sym_decrypt(key, cipher_key), algorithm)
 			FROM (SELECT key, algorithm FROM cipher_key_table ) AS ckt;
 		EXCEPTION
 			WHEN SQLSTATE '39000' THEN
-				PERFORM enc_remove_key_detail();
+				PERFORM enc_rm_key();
 				RAISE EXCEPTION 'EDB-ENC0012 cipher key is not correct';
 		END;
 	END IF;
@@ -667,17 +714,17 @@ $_$;
 
 
 --
--- Name: remove_key_details(); Type: FUNCTION; Schema: public; Owner: enterprisedb
+-- Name: rm_key_details(); Type: FUNCTION; Schema: public; Owner: enterprisedb
 --
 
-CREATE FUNCTION remove_key_details() RETURNS boolean
+CREATE FUNCTION rm_key_details() RETURNS boolean
     LANGUAGE plpgsql
     SET search_path TO public
     AS $$
 
 BEGIN
 	/* drop encryption key table in memory */
-	IF (SELECT enc_remove_key_detail()) THEN
+	IF (SELECT enc_rm_key()) THEN
 		RETURN TRUE;
 	ELSE
 		RETURN FALSE;
@@ -685,99 +732,3 @@ BEGIN
 END;
 $$;
 
-
-
---
--- Name: regclass(encrypted_text); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION regclass(encrypted_text) RETURNS regclass
-    LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'column_enc_text_regclass';
-
-
-
---
--- Name: =; Type: OPERATOR; Schema: public; Owner: enterprisedb
---
-
-CREATE OPERATOR = (
-    PROCEDURE = column_enc_comp_eq_text,
-    LEFTARG = encrypted_text,
-    RIGHTARG = encrypted_text,
-    RESTRICT = eqsel,
-    JOIN = eqjoinsel
-);
-
-
-
---
--- Name: =; Type: OPERATOR; Schema: public; Owner: enterprisedb
---
-
-CREATE OPERATOR = (
-    PROCEDURE = column_enc_comp_eq_bytea,
-    LEFTARG = encrypted_bytea,
-    RIGHTARG = encrypted_bytea,
-    RESTRICT = eqsel,
-    JOIN = eqjoinsel
-);
-
-
-
---
--- Name: hash_bytea_enc_ops; Type: OPERATOR FAMILY; Schema: public; Owner: enterprisedb
---
-
-CREATE OPERATOR FAMILY hash_bytea_enc_ops USING hash;
-
-
-
---
--- Name: hash_bytea_enc_ops; Type: OPERATOR CLASS; Schema: public; Owner: enterprisedb
---
-
-CREATE OPERATOR CLASS hash_bytea_enc_ops
-    DEFAULT FOR TYPE encrypted_bytea USING hash FAMILY hash_bytea_enc_ops AS
-    OPERATOR 1 =(encrypted_bytea,encrypted_bytea) ,
-    FUNCTION 1 (encrypted_bytea, encrypted_bytea) enc_hash_encbytea(encrypted_bytea);
-
-
-
---
--- Name: hash_text_enc_ops; Type: OPERATOR FAMILY; Schema: public; Owner: enterprisedb
---
-
-CREATE OPERATOR FAMILY hash_text_enc_ops USING hash;
-
-
-
---
--- Name: hash_text_enc_ops; Type: OPERATOR CLASS; Schema: public; Owner: enterprisedb
---
-
-CREATE OPERATOR CLASS hash_text_enc_ops
-    DEFAULT FOR TYPE encrypted_text USING hash FAMILY hash_text_enc_ops AS
-    OPERATOR 1 =(encrypted_text,encrypted_text) ,
-    FUNCTION 1 (encrypted_text, encrypted_text) enc_hash_enctext(encrypted_text);
-
-
-
-SET default_tablespace = '';
-
-SET default_with_oids = false;
-
---
--- Name: cipher_key_table; Type: TABLE; Schema: public; Owner: enterprisedb
---
-
-CREATE TABLE cipher_key_table (
-    key bytea,
-    algorithm text
-);
-
-CREATE INDEX algo_idx ON cipher_key_table(algorithm);
-
---
--- Name: cipher_key_table; Type: ACL; Schema: public; Owner: enterprisedb
---
