@@ -375,10 +375,6 @@ CREATE FUNCTION cipher_key_disable_log() RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO public
     AS $$
-
-DECLARE
-	save_result BOOLEAN;	/* result of backup current parameter */
-
 BEGIN
 
 	SET track_activities = off;
@@ -397,10 +393,6 @@ CREATE FUNCTION cipher_key_enable_log() RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO public
     AS $$
-
-DECLARE
-	save_result BOOLEAN;
-
 BEGIN
 
 	SET track_activities = DEFAULT;
@@ -426,12 +418,7 @@ DECLARE
 	new_cipher_key  ALIAS FOR $3;
 
 	f_rec RECORD;	/* store target update column */
-	f_rec2 RECORD;	/* store target update row */
 	f_cu	REFCURSOR;	/* fetch target update column */
-	f_cu2	REFCURSOR;	/* fetch target update row */
-
-	f_counter	BIGINT;		/* number of processed target record*/
-	f_result	BIGINT;
 
 	f_query TEXT;					/* store dynamic SQL string */
 	
@@ -442,7 +429,6 @@ DECLARE
 
 BEGIN
 	/* init */
-	f_counter := 0;
 	f_relid := 0;
 	f_nspname = '';
 	f_relname = '';
