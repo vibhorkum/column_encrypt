@@ -731,5 +731,3 @@ BEGIN
 	END IF;
 END;
 $$;
-
-
