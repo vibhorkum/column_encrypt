@@ -1008,3 +1008,8 @@ binary_comparison(bytea *barg1, bytea *barg2)
     }
     return result;
 }
+<<<<<<< HEAD
+
+
+=======
+>>>>>>> 928837795ade3c94eb27eb854d9e3f44ac0bb079
