@@ -403,124 +403,12 @@ END;
 $$;
 
 
---
--- Name: cipher_key_reencrypt_data(text, text, text); Type: FUNCTION; Schema: public; Owner: enterprisedb
---
-
-CREATE FUNCTION cipher_key_reencrypt_data(text, text, text) RETURNS boolean
-    LANGUAGE plpgsql
-    AS $_$
-
-DECLARE
-
-	old_cipher_key ALIAS FOR $1;
-	old_cipher_algorithm ALIAS FOR $2;
-	new_cipher_key  ALIAS FOR $3;
-
-	f_rec RECORD;	/* store target update column */
-	f_cu	REFCURSOR;	/* fetch target update column */
-
-	f_query TEXT;					/* store dynamic SQL string */
-	
-	f_relid BIGINT;
-	f_nspname TEXT;
-	f_relname TEXT;
-	f_islast BOOLEAN;
-
-BEGIN
-	/* init */
-	f_relid := 0;
-	f_nspname = '';
-	f_relname = '';
-	f_islast = FALSE;
-
-	SET LOCAL search_path TO public;
-	SET LOCAL encrypt.enable TO on;
-	SET LOCAL encrypt.noversionerror TO on;
-	
-	/* set new key to memory */
-	PERFORM load_key(new_cipher_key);
-	/* set old key to memory */
-	PERFORM enc_store_prv_key(old_cipher_key, old_cipher_algorithm);
-
-	/* store column of user defined table */
-	OPEN
-		f_cu
-	FOR
-		SELECT a.attrelid, n.nspname, c.relname, a.attname, t.typname
-		FROM pg_attribute a, pg_class c, pg_type t, pg_namespace n
-		WHERE a.attrelid = c.oid
-		AND t.oid = a.atttypid
-		AND c.relnamespace = n.oid
-		AND c.relkind = 'r'
-		AND t.typname IN ('encrypted_text', 'encrypted_bytea')
-		AND n.nspname != 'information_schema'
-		AND n.nspname NOT LIKE E'pg\\_%'
-		ORDER BY nspname, relname, attname;
-	
-
-	/* re-encryption */
-	FETCH f_cu INTO f_rec;
-	IF NOT FOUND THEN
-		f_islast := TRUE;
-	END IF;
-
-	/* update each encrypted column */
-	LOOP
-		IF f_islast THEN
-			EXIT;
-		END IF;
-
-		f_relid := f_rec.attrelid;
-		f_nspname := f_rec.nspname;
-		f_relname := f_rec.relname;
-
-		f_query := 'UPDATE ONLY ' || quote_ident(f_rec.nspname) || '.' || quote_ident(f_rec.relname) || ' SET ';
-
-		LOOP
-			IF f_rec.typname = 'encrypted_text' THEN
-				f_query := f_query || quote_ident(f_rec.attname) || ' = ' || quote_ident(f_rec.attname) || '::text::encrypted_text ';
-			ELSE
-				f_query := f_query || quote_ident(f_rec.attname) || ' = ' || quote_ident(f_rec.attname) || '::bytea::encrypted_bytea ';
-			END IF;
-
-			FETCH f_cu INTO f_rec;
-			IF NOT FOUND THEN
-				f_islast := TRUE;
-			END IF;
-
-			IF f_islast OR f_relid != f_rec.attrelid THEN
-				f_query := f_query || ';';
-				EXIT;
-			ELSE
-				f_query := f_query || ', ';
-			END IF;
-		END LOOP;
-
-		RAISE INFO 'EDB-ENC0001 re-encryption of table "%"."%" was started[01]', f_nspname, f_relname;
-
-		EXECUTE f_query;
-
-		RAISE INFO 'EDB-ENC0002 re-encryption of table "%"."%" was completed[01]', f_nspname, f_relname;
-	END LOOP;
-
-	CLOSE f_cu;
-	
-	/* delete old key from memory */
-	PERFORM enc_rm_prv_key();
-	/* drop key from memory */
-	PERFORM rm_key_details();
-
-	RETURN TRUE;
-END;
-$_$;
-
 
 --
 -- Name: register_cipher_key(text, text, text, text); Type: FUNCTION;
 --
 
-CREATE FUNCTION register_cipher_key(text, text, text) RETURNS integer
+CREATE FUNCTION register_cipher_key(text, text) RETURNS integer
     LANGUAGE plpgsql
     AS $_$
 
@@ -528,7 +416,6 @@ DECLARE
 	current_cipher_key  ALIAS FOR $1;
 	cipher_key  ALIAS FOR $2;
 	cipher_algorithm ALIAS FOR $3;
-    --    cipher_owner ALIAS FOR $4;
 
 	current_cipher_algorithm TEXT;
 	
@@ -573,9 +460,6 @@ BEGIN
 			WHEN SQLSTATE '39000' THEN
 				RAISE EXCEPTION 'EDB-ENC0008 current cipher key is not correct';
 		END;
-		/* delete current key */
-		DELETE FROM cipher_key_table;
-
 	/* too many key is exists */
 	ELSEIF f_key_num > 1 THEN
 			RAISE EXCEPTION 'EDB-ENC0009 too many encryption keys are exists in cipher_key_table';
@@ -583,13 +467,6 @@ BEGIN
 	
 	/* encrypt and register new key */
 	INSERT INTO cipher_key_table(key, algorithm) VALUES(pgp_sym_encrypt(cipher_key, cipher_key, 'cipher-algo=aes256, s2k-mode=1'), cipher_algorithm);
-
-	/* reencrypt all data */
-	IF f_key_num = 1 THEN
-		PERFORM cipher_key_reencrypt_data(current_cipher_key, current_cipher_algorithm, cipher_key);
-	END IF;
-
-	/* return 1 */
 	RETURN 1;
 END;
 $_$;
