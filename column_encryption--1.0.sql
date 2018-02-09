@@ -32,7 +32,7 @@ DROP FUNCTION IF EXISTS public.enc_rm_prv_key();
 DROP FUNCTION IF EXISTS public.enc_rm_key();
 DROP FUNCTION IF EXISTS public.col_enc_comp_eq_text(encrypted_text, encrypted_text);
 DROP FUNCTION IF EXISTS public.col_enc_comp_eq_bytea(encrypted_bytea, encrypted_bytea);
-DROP FUNCTION IF EXISTS public.register_cipher_key(text, text, text);
+DROP FUNCTION IF EXISTS public.register_cipher_key(text, text);
 DROP FUNCTION IF EXISTS public.cipher_key_reencrypt_data(text, text, text);
 DROP FUNCTION IF EXISTS public.cipher_key_enable_log();
 DROP FUNCTION IF EXISTS public.cipher_key_disable_log();
@@ -413,9 +413,8 @@ CREATE FUNCTION register_cipher_key(text, text) RETURNS integer
     AS $_$
 
 DECLARE
-	current_cipher_key  ALIAS FOR $1;
-	cipher_key  ALIAS FOR $2;
-	cipher_algorithm ALIAS FOR $3;
+	cipher_key  ALIAS FOR $1;
+	cipher_algorithm ALIAS FOR $2;
 
 	current_cipher_algorithm TEXT;
 	
@@ -449,20 +448,7 @@ BEGIN
 	SELECT count(*) INTO f_key_num FROM cipher_key_table;
 	/* if encryption key is already exist */
 	IF f_key_num = 1 THEN
-		IF current_cipher_key IS NULL THEN
-			RAISE EXCEPTION 'EDB-ENC0008 current cipher key is not correct';
-		END IF;
-		/* if current key is valid and save current encryption algorithm*/
-		BEGIN
-			SELECT algorithm INTO current_cipher_algorithm FROM cipher_key_table WHERE  
-                                                           pgp_sym_decrypt(key, current_cipher_key)=current_cipher_key;
-		EXCEPTION
-			WHEN SQLSTATE '39000' THEN
-				RAISE EXCEPTION 'EDB-ENC0008 current cipher key is not correct';
-		END;
-	/* too many key is exists */
-	ELSEIF f_key_num > 1 THEN
-			RAISE EXCEPTION 'EDB-ENC0009 too many encryption keys are exists in cipher_key_table';
+			RAISE EXCEPTION 'EDB-ENC0009 a cypher encryption keys are exists in cipher_key_table';
 	END IF;
 	
 	/* encrypt and register new key */
@@ -563,7 +549,7 @@ BEGIN
 		BEGIN
 			/* load encryption key table to memory */
 			PERFORM enc_store_key(pgp_sym_decrypt(key, cipher_key), algorithm)
-			FROM (SELECT key, algorithm FROM cipher_key_table ) AS ckt;
+			FROM cipher_key_table;
 		EXCEPTION
 			WHEN SQLSTATE '39000' THEN
 				PERFORM enc_rm_key();
@@ -594,3 +580,4 @@ BEGIN
 	END IF;
 END;
 $$;
+
