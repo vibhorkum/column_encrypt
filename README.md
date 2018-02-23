@@ -32,7 +32,7 @@ psql -h server.hostname.org -p 5444 -c "CREATE EXTENSION column_encryption;" dbn
 1. Connect to database using psql and register your key:
 ```sql
 SELECT cipher_key_disable_log();
-SELECT register_cipher_key('init', 'AES-DBC-AEF-GHI-JKL','aes');
+SELECT register_cipher_key('AES-DBC-AEF-GHI-JKL','aes');
 SELECT cipher_key_enable_log();
 ```
 2. After registering the key, reconnect to a session and load your key as given below:
