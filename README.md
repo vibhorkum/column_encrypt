@@ -39,7 +39,6 @@ SELECT cipher_key_enable_log();
 ```sql
 SELECT cipher_key_disable_log();
 SELECT load_key('AES-DBC-AEF-GHI-JKL');
-SELECT cipher_key_enable_log();
 ```
 3.  Create a table using data encrypt_bytea/encrypt_text data-types and insert some records
 ```sql
