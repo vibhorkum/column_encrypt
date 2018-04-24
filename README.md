@@ -72,14 +72,14 @@ test=# SELECT cipher_key_disable_log();
  t
 (1 row)
 
-test=# SELECT load_key_details('AES-DBC-AEF-GHI-JKI');
+test=# SELECT load_key('AES-DBC-AEF-GHI-JKI');
 ERROR:  EDB-ENC0012 cipher key is not correct
 ```
 Above was also expected because user tried to pass the wrong key.
 
 Module also comes with a parameter column_encrypt.encrypt_enable, which by default is on. If user disable this parameter he can query the table. However, will not be able to see the actual data. Example is given below:
 ```sql
-test=# set column_encrypt.encrypt_enable to off;
+test=# set encrypt.encrypt_enable to off;
 SET
 test=# select * from secure_data;
  id |                  ssn                   
