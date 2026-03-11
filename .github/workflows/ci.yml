@@ -51,10 +51,15 @@ jobs:
       - name: Run regression tests
         run: |
           export PGDATA=$(mktemp -d)
+          export PGPORT=54321
+          export PGHOST=/tmp
           initdb --no-locale -E UTF8 "$PGDATA"
           echo "shared_preload_libraries = 'column_encryption'" >> "$PGDATA/postgresql.conf"
-          pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" start
+          echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
+          echo "port = $PGPORT" >> "$PGDATA/postgresql.conf"
+          pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -w start || \
+            (cat "$PGDATA/postgres.log" && exit 1)
           createdb test_column_encryption
           make installcheck PGDATABASE=test_column_encryption || \
-            (cat regression.diffs && pg_ctl -D "$PGDATA" stop && exit 1)
+            (cat "$PGDATA/postgres.log" && cat regression.diffs && pg_ctl -D "$PGDATA" stop && exit 1)
           pg_ctl -D "$PGDATA" stop
