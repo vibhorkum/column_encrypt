@@ -1,10 +1,10 @@
-MODULE_big = column_encryption
- OBJS = column_encryption.o
+MODULE_big = column_encrypt
+ OBJS = column_encrypt.o
  
- EXTENSION = column_encryption
- DATA = column_encryption--1.0.sql column_encryption--1.0--2.0.sql column_encryption--2.0.sql
+ EXTENSION = column_encrypt
+ DATA = column_encrypt--1.0.sql column_encrypt--1.0--2.0.sql column_encrypt--2.0.sql
 
- REGRESS = column_encryption
+ REGRESS = column_encrypt
 
  PG_CONFIG = pg_config
  PGXS := $(shell $(PG_CONFIG) --pgxs)

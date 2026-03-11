@@ -1,8 +1,8 @@
--- column_encryption regression tests
+-- column_encrypt regression tests
 
 -- Install pgcrypto (required dependency) and then load the extension
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE EXTENSION IF NOT EXISTS column_encryption;
+CREATE EXTENSION IF NOT EXISTS column_encrypt;
 
 -- Disable logging before key operations
 SELECT cipher_key_disable_log();

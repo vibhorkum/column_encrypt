@@ -1,8 +1,8 @@
-/* share/extension/column_encryption--1.0.sql */
+/* share/extension/column_encrypt--2.0.sql */
 
  -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 
-\echo Use "CREATE EXTENSION column_encryption" to load this file. \quit
+\echo Use "CREATE EXTENSION column_encrypt" to load this file. \quit
 
 SET check_function_bodies TO off;
 
@@ -61,7 +61,7 @@ CREATE TYPE encrypted_text;
 
 CREATE FUNCTION col_enc_bytea_in(cstring) RETURNS encrypted_bytea
     LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'col_enc_bytea_in';
+    AS 'column_encrypt', 'col_enc_bytea_in';
 
 /*
  * Output function for encrypted bytea
@@ -69,7 +69,7 @@ CREATE FUNCTION col_enc_bytea_in(cstring) RETURNS encrypted_bytea
 
 CREATE FUNCTION col_enc_bytea_out(encrypted_bytea) RETURNS cstring
     LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'col_enc_bytea_out';
+    AS 'column_encrypt', 'col_enc_bytea_out';
 
 /*
  * Define recv function for encrypted bytea
@@ -77,7 +77,7 @@ CREATE FUNCTION col_enc_bytea_out(encrypted_bytea) RETURNS cstring
 
 CREATE FUNCTION col_enc_recv_bytea(internal) RETURNS encrypted_bytea
     LANGUAGE c IMMUTABLE STRICT
-    AS 'column_encryption', 'col_enc_recv';
+    AS 'column_encrypt', 'col_enc_recv';
 
 /*
  * Define send function for encrypted bytea
@@ -85,7 +85,7 @@ CREATE FUNCTION col_enc_recv_bytea(internal) RETURNS encrypted_bytea
 
 CREATE FUNCTION col_enc_send_bytea(encrypted_bytea) RETURNS bytea
     LANGUAGE c IMMUTABLE STRICT
-    AS 'column_encryption', 'col_enc_send';
+    AS 'column_encrypt', 'col_enc_send';
 
 /*
  * Define encrypted_bytea data type
@@ -107,7 +107,7 @@ CREATE TYPE encrypted_bytea (
 
 CREATE FUNCTION col_enc_text_in(cstring) RETURNS encrypted_text
     LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'col_enc_text_in';
+    AS 'column_encrypt', 'col_enc_text_in';
 
 /*
  * Output function for encrypted_text
@@ -115,7 +115,7 @@ CREATE FUNCTION col_enc_text_in(cstring) RETURNS encrypted_text
 
 CREATE FUNCTION col_enc_text_out(encrypted_text) RETURNS cstring
     LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'col_enc_text_out';
+    AS 'column_encrypt', 'col_enc_text_out';
 
 
 /*
@@ -124,7 +124,7 @@ CREATE FUNCTION col_enc_text_out(encrypted_text) RETURNS cstring
 
 CREATE FUNCTION col_enc_recv_text(internal) RETURNS encrypted_text
     LANGUAGE c IMMUTABLE STRICT
-    AS 'column_encryption', 'col_enc_recv';
+    AS 'column_encrypt', 'col_enc_recv';
 
 /*
  * Define send function for encrypted text
@@ -132,7 +132,7 @@ CREATE FUNCTION col_enc_recv_text(internal) RETURNS encrypted_text
 
 CREATE FUNCTION col_enc_send_text(encrypted_text) RETURNS bytea
     LANGUAGE c IMMUTABLE STRICT
-    AS 'column_encryption', 'col_enc_send';
+    AS 'column_encrypt', 'col_enc_send';
 
 /*
  * Define encrypted text data type
@@ -155,7 +155,7 @@ CREATE TYPE encrypted_text (
 
 CREATE FUNCTION col_enc_comp_eq_bytea(encrypted_bytea, encrypted_bytea) RETURNS boolean
 LANGUAGE c STABLE STRICT
-AS 'column_encryption', 'col_enc_comp_eq_bytea';
+AS 'column_encrypt', 'col_enc_comp_eq_bytea';
 
 
 /*
@@ -164,7 +164,7 @@ AS 'column_encryption', 'col_enc_comp_eq_bytea';
 
 CREATE FUNCTION col_enc_comp_eq_text(encrypted_text, encrypted_text) RETURNS boolean
 LANGUAGE c STABLE STRICT
-AS 'column_encryption', 'col_enc_comp_eq_text';
+AS 'column_encrypt', 'col_enc_comp_eq_text';
 
 
 /*
@@ -200,14 +200,14 @@ JOIN = eqjoinsel
 
 CREATE FUNCTION enc_hash_encbytea(encrypted_bytea) RETURNS integer
 LANGUAGE c IMMUTABLE STRICT
-AS 'column_encryption', 'enc_hash_encrted_data';
+AS 'column_encrypt', 'enc_hash_encrted_data';
 
 /*
  * hash function for encrypted text
  */
 CREATE FUNCTION enc_hash_enctext(encrypted_text) RETURNS integer
 LANGUAGE c IMMUTABLE STRICT
-AS 'column_encryption', 'enc_hash_encrted_data';
+AS 'column_encrypt', 'enc_hash_encrted_data';
 
 
 /*
@@ -238,25 +238,25 @@ FUNCTION 1 (encrypted_text, encrypted_text) enc_hash_enctext(encrypted_text);
 
 CREATE FUNCTION enctext(boolean) RETURNS encrypted_text
 LANGUAGE c STRICT
-AS 'column_encryption', 'bool_enc_text';
+AS 'column_encrypt', 'bool_enc_text';
 
 CREATE FUNCTION enctext(character) RETURNS encrypted_text
 LANGUAGE c STABLE STRICT
-AS 'column_encryption', 'enc_text_trim';
+AS 'column_encrypt', 'enc_text_trim';
 
 
 CREATE FUNCTION enctext(inet) RETURNS encrypted_text
 LANGUAGE c STABLE STRICT
-AS 'column_encryption', 'inet_enc_text';
+AS 'column_encrypt', 'inet_enc_text';
 
 
 CREATE FUNCTION enctext(xml) RETURNS encrypted_text
 LANGUAGE c STABLE STRICT
-AS 'column_encryption', 'xml_enc_text';
+AS 'column_encrypt', 'xml_enc_text';
 
 CREATE FUNCTION regclass(encrypted_text) RETURNS regclass
 LANGUAGE c STABLE STRICT
-AS 'column_encryption', 'enc_text_regclass';
+AS 'column_encrypt', 'enc_text_regclass';
 
 /*
  * encrypted text -> text
@@ -483,7 +483,7 @@ $_$;
 
 CREATE FUNCTION enc_rm_key() RETURNS boolean
     LANGUAGE c STRICT
-    AS 'column_encryption', 'enc_rm_key';
+    AS 'column_encrypt', 'enc_rm_key';
 
 --
 -- Name: enc_rm_prv_key(); Type: FUNCTION; Schema: public; Owner: enterprisedb
@@ -491,7 +491,7 @@ CREATE FUNCTION enc_rm_key() RETURNS boolean
 
 CREATE FUNCTION enc_rm_prv_key() RETURNS boolean
     LANGUAGE c STRICT
-    AS 'column_encryption', 'enc_rm_prv_key';
+    AS 'column_encrypt', 'enc_rm_prv_key';
 
 
 
@@ -501,7 +501,7 @@ CREATE FUNCTION enc_rm_prv_key() RETURNS boolean
 
 CREATE FUNCTION enc_store_key(text, text) RETURNS boolean
     LANGUAGE c STRICT
-    AS 'column_encryption', 'enc_store_key';
+    AS 'column_encrypt', 'enc_store_key';
 
 
 
@@ -511,7 +511,7 @@ CREATE FUNCTION enc_store_key(text, text) RETURNS boolean
 
 CREATE FUNCTION enc_store_prv_key(text, text) RETURNS boolean
     LANGUAGE c STRICT
-    AS 'column_encryption', 'enc_store_prv_key';
+    AS 'column_encrypt', 'enc_store_prv_key';
 
 
 --
@@ -520,7 +520,7 @@ CREATE FUNCTION enc_store_prv_key(text, text) RETURNS boolean
 
 CREATE FUNCTION pgstat_actv_mask() RETURNS void
     LANGUAGE c STABLE STRICT
-    AS 'column_encryption', 'pgstat_actv_mask';
+    AS 'column_encrypt', 'pgstat_actv_mask';
 
 
 
