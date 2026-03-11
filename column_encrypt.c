@@ -37,7 +37,7 @@ secure_memset(void *ptr, int c, size_t len)
  *
  * Look up pgcrypto's pg_encrypt / pg_decrypt by their full signature at
  * runtime (first call per session) instead of at link time.  This avoids
- * an undefined-symbol error when column_encryption.so is loaded via
+ * an undefined-symbol error when column_encrypt.so is loaded via
  * shared_preload_libraries before any pgcrypto symbols are available.
  */
 static Oid

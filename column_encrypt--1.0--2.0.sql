@@ -1,7 +1,7 @@
-/* column_encryption--1.0--2.0.sql */
+/* column_encrypt--1.0--2.0.sql */
 
 -- complain if script is sourced in psql, rather than via ALTER EXTENSION
-\echo Use "ALTER EXTENSION column_encryption UPDATE TO '2.0'" to load this file. \quit
+\echo Use "ALTER EXTENSION column_encrypt UPDATE TO '2.0'" to load this file. \quit
 
 --
 -- Upgrade from 1.0 to 2.0
