@@ -32,6 +32,38 @@ secure_memset(void *ptr, int c, size_t len)
 		*p++ = (char) c;
 }
 
+/*
+ * pgcrypto_encrypt_oid / pgcrypto_decrypt_oid
+ *
+ * Look up pgcrypto's pg_encrypt / pg_decrypt by their full signature at
+ * runtime (first call per session) instead of at link time.  This avoids
+ * an undefined-symbol error when column_encryption.so is loaded via
+ * shared_preload_libraries before any pgcrypto symbols are available.
+ */
+static Oid
+pgcrypto_encrypt_oid(void)
+{
+	static Oid	oid = InvalidOid;
+
+	if (!OidIsValid(oid))
+		oid = DatumGetObjectId(
+							   DirectFunctionCall1(regprocedurein,
+												   CStringGetDatum("pg_encrypt(bytea,bytea,text)")));
+	return oid;
+}
+
+static Oid
+pgcrypto_decrypt_oid(void)
+{
+	static Oid	oid = InvalidOid;
+
+	if (!OidIsValid(oid))
+		oid = DatumGetObjectId(
+							   DirectFunctionCall1(regprocedurein,
+												   CStringGetDatum("pg_decrypt(bytea,bytea,text)")));
+	return oid;
+}
+
 typedef struct
 {
 	bytea	   *key;			/* encryption key */
@@ -40,8 +72,6 @@ typedef struct
 
 
 /* Function declarations */
-Datum		pg_encrypt(PG_FUNCTION_ARGS);
-Datum		pg_decrypt(PG_FUNCTION_ARGS);
 void		_PG_init(void);
 void		_PG_fini(void);
 
@@ -898,9 +928,11 @@ pg_col_encrypt(bytea *input_data)
 		ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
 						errmsg("cannot encrypt data, because key was not set")));
 	}
-	encrypted_data = (bytea *) DatumGetPointer(DirectFunctionCall3(pg_encrypt,
-																   PointerGetDatum(input_data), PointerGetDatum(current_key_detail->key),
-																   PointerGetDatum(current_key_detail->algorithm)));
+	encrypted_data = (bytea *) DatumGetPointer(OidFunctionCall3(
+													pgcrypto_encrypt_oid(),
+													PointerGetDatum(input_data),
+													PointerGetDatum(current_key_detail->key),
+													PointerGetDatum(current_key_detail->algorithm)));
 	return encrypted_data;
 }
 
@@ -915,8 +947,10 @@ pg_col_decrypt(key_detail * entry, bytea *encrypted_data)
 		ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
 						errmsg("cannot decrypt data, because key was not set")));
 	}
-	result = DirectFunctionCall3(pg_decrypt, PointerGetDatum(encrypted_data),
-								 PointerGetDatum(entry->key), PointerGetDatum(entry->algorithm));
+	result = OidFunctionCall3(pgcrypto_decrypt_oid(),
+							  PointerGetDatum(encrypted_data),
+							  PointerGetDatum(entry->key),
+							  PointerGetDatum(entry->algorithm));
 	return result;
 }
 
