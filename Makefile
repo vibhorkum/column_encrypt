@@ -6,8 +6,6 @@ MODULE_big = column_encryption
 
  REGRESS = column_encryption
 
- SHLIB_LINK = $(shell $(PG_CONFIG) --pkglibdir)/pgcrypto.so
- 
  PG_CONFIG = pg_config
  PGXS := $(shell $(PG_CONFIG) --pgxs)
  include $(PGXS)

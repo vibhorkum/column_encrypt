@@ -15,11 +15,22 @@
 #include "utils/memutils.h"
 #include "catalog/pg_collation.h"
 
-#include "px.h"
-
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
 #endif							/* END PG_MODULE_MAGIC */
+
+/*
+ * secure_memset - volatile memset to prevent compiler from optimizing away
+ * memory clearing of sensitive data (e.g. encryption keys).
+ */
+static void
+secure_memset(void *ptr, int c, size_t len)
+{
+	volatile char *p = (volatile char *) ptr;
+
+	while (len--)
+		*p++ = (char) c;
+}
 
 typedef struct
 {
@@ -238,7 +249,7 @@ suppress_keylog_hook(ErrorData *edata)
 				pfree((void *) replaceMsg_tmp);
 			}
 			/* do not leave anything relate to key info in memory */
-			px_memset(edata->message, 0, strlen(edata->message) + 1);
+			secure_memset(edata->message, 0, strlen(edata->message) + 1);
 			pfree(edata->message);
 			edata->message = TextDatumGetCString(convertedMsg);
 			if (convertedMsg)
@@ -285,7 +296,7 @@ suppress_keylog_hook(ErrorData *edata)
 				pfree((void *) regex_param);
 			}
 			/* do not leave anything relate to key info in memory */
-			px_memset(edata->detail, 0, strlen(edata->detail) + 1);
+			secure_memset(edata->detail, 0, strlen(edata->detail) + 1);
 			pfree(edata->detail);
 			edata->detail = TextDatumGetCString(replaceMsg_tmp);
 			if (replaceMsg_tmp)
@@ -312,7 +323,7 @@ suppress_keylog_hook(ErrorData *edata)
 				pfree((void *) replaceMsg_tmp);
 			}
 			/* do not leave anything relate to key info in memory */
-			px_memset(edata->internalquery, 0, strlen(edata->internalquery) + 1);
+			secure_memset(edata->internalquery, 0, strlen(edata->internalquery) + 1);
 			pfree(edata->internalquery);
 			edata->internalquery = TextDatumGetCString(convertedMsg);
 			if (convertedMsg)
@@ -339,7 +350,7 @@ suppress_keylog_hook(ErrorData *edata)
 				pfree((void *) replaceMsg_tmp);
 			}
 			/* do not leave anything relate to key info in memory */
-			px_memset(edata->context, 0, strlen(edata->context) + 1);
+			secure_memset(edata->context, 0, strlen(edata->context) + 1);
 			pfree(edata->context);
 			edata->context = TextDatumGetCString(convertedMsg);
 			if (convertedMsg)
@@ -762,8 +773,8 @@ remove_key_detail(key_detail * entry)
 	{
 		if (entry->key != NULL)
 		{
-			/* remove all info realted to in memory */
-			px_memset(entry->key, 0, VARSIZE(entry->key));
+			/* remove all info related to in memory */
+			secure_memset(entry->key, 0, VARSIZE(entry->key));
 			pfree(entry->key);
 		}
 		if (entry->algorithm != NULL)
