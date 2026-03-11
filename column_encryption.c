@@ -48,7 +48,7 @@ pgcrypto_encrypt_oid(void)
 	if (!OidIsValid(oid))
 		oid = DatumGetObjectId(
 							   DirectFunctionCall1(regprocedurein,
-												   CStringGetDatum("pg_encrypt(bytea,bytea,text)")));
+												   CStringGetDatum("encrypt(bytea,bytea,text)")));
 	return oid;
 }
 
@@ -60,7 +60,7 @@ pgcrypto_decrypt_oid(void)
 	if (!OidIsValid(oid))
 		oid = DatumGetObjectId(
 							   DirectFunctionCall1(regprocedurein,
-												   CStringGetDatum("pg_decrypt(bytea,bytea,text)")));
+												   CStringGetDatum("decrypt(bytea,bytea,text)")));
 	return oid;
 }
 
