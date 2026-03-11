@@ -14,8 +14,6 @@
 #include "libpq/pqformat.h"
 #include "utils/memutils.h"
 #include "catalog/pg_collation.h"
-#include "access/hash.h"
-#include "libpq/pqformat.h"
 
 #include "px.h"
 
@@ -73,7 +71,7 @@ static bool encrypt_enable = true;
 
 
 /* whether mask mask_query_log query log or not */
-static bool mask_key_log = false;
+static bool mask_key_log = true;
 
 /* backup of log_min_error_statement value*/
 int			backup_log_min_error_statement = -1;
@@ -86,7 +84,9 @@ key_detail *current_key_detail = NULL;
 
 /* previous encryption key */
 key_detail *previous_key_detail = NULL;
-const short header = 1;
+
+/* current key version written into the ciphertext header */
+static int	current_key_version = 1;
 
 /* mask log messages */
 static void suppress_keylog_hook(ErrorData *);
@@ -112,7 +112,7 @@ _PG_init(void)
 							 "mask query log messages, string within () mark will be masked by *****",
 							 NULL,
 							 &mask_key_log,
-							 false,
+							 true,
 							 PGC_SUSET,
 							 0,
 							 NULL,
@@ -124,11 +124,24 @@ _PG_init(void)
 							 NULL,
 							 &encrypt_enable,
 							 true,
-							 PGC_USERSET,
+							 PGC_SUSET,
 							 0,
 							 NULL,
 							 NULL,
 							 NULL);
+
+	DefineCustomIntVariable("encrypt.key_version",
+							"Current encryption key version stored in ciphertext header.",
+							NULL,
+							&current_key_version,
+							1,		/* default */
+							1,		/* min */
+							32767,	/* max — fits in short */
+							PGC_SUSET,
+							0,
+							NULL,
+							NULL,
+							NULL);
 
 }
 
@@ -199,7 +212,6 @@ suppress_keylog_hook(ErrorData *edata)
 												   flag);
 			if (replaceMsg_tmp)
 			{
-				px_memset((void *) replaceMsg_tmp, 0, sizeof(replaceMsg_tmp));
 				pfree((void *) replaceMsg_tmp);
 			}
 			old_mem_context = MemoryContextSwitchTo(MessageContext);
@@ -223,11 +235,10 @@ suppress_keylog_hook(ErrorData *edata)
 												   flag);
 			if (replaceMsg_tmp)
 			{
-				px_memset((void *) replaceMsg_tmp, 0, sizeof(replaceMsg_tmp));
 				pfree((void *) replaceMsg_tmp);
 			}
 			/* do not leave anything relate to key info in memory */
-			px_memset(edata->message, 0, sizeof(edata->message));
+			px_memset(edata->message, 0, strlen(edata->message) + 1);
 			pfree(edata->message);
 			edata->message = TextDatumGetCString(convertedMsg);
 			if (convertedMsg)
@@ -251,7 +262,6 @@ suppress_keylog_hook(ErrorData *edata)
 												   flag);
 			if (replaceMsg_tmp)
 			{
-				px_memset((void *) replaceMsg_tmp, 0, sizeof(replaceMsg_tmp));
 				pfree((void *) replaceMsg_tmp);
 			}
 
@@ -268,7 +278,6 @@ suppress_keylog_hook(ErrorData *edata)
 													 flag);
 			if (convertedMsg)
 			{
-				px_memset((void *) convertedMsg, 0, sizeof(convertedMsg));
 				pfree((void *) convertedMsg);
 			}
 			if (regex_param)
@@ -276,7 +285,7 @@ suppress_keylog_hook(ErrorData *edata)
 				pfree((void *) regex_param);
 			}
 			/* do not leave anything relate to key info in memory */
-			px_memset(edata->detail, 0, sizeof(edata->detail));
+			px_memset(edata->detail, 0, strlen(edata->detail) + 1);
 			pfree(edata->detail);
 			edata->detail = TextDatumGetCString(replaceMsg_tmp);
 			if (replaceMsg_tmp)
@@ -300,11 +309,10 @@ suppress_keylog_hook(ErrorData *edata)
 												   flag);
 			if (replaceMsg_tmp)
 			{
-				px_memset((void *) replaceMsg_tmp, 0, sizeof(replaceMsg_tmp));
 				pfree((void *) replaceMsg_tmp);
 			}
 			/* do not leave anything relate to key info in memory */
-			px_memset(edata->internalquery, 0, sizeof(edata->internalquery));
+			px_memset(edata->internalquery, 0, strlen(edata->internalquery) + 1);
 			pfree(edata->internalquery);
 			edata->internalquery = TextDatumGetCString(convertedMsg);
 			if (convertedMsg)
@@ -328,11 +336,10 @@ suppress_keylog_hook(ErrorData *edata)
 												   flag);
 			if (replaceMsg_tmp)
 			{
-				px_memset((void *) replaceMsg_tmp, 0, sizeof(replaceMsg_tmp));
 				pfree((void *) replaceMsg_tmp);
 			}
 			/* do not leave anything relate to key info in memory */
-			px_memset(edata->context, 0, sizeof(edata->context));
+			px_memset(edata->context, 0, strlen(edata->context) + 1);
 			pfree(edata->context);
 			edata->context = TextDatumGetCString(convertedMsg);
 			if (convertedMsg)
@@ -756,7 +763,7 @@ remove_key_detail(key_detail * entry)
 		if (entry->key != NULL)
 		{
 			/* remove all info realted to in memory */
-			px_memset(entry->key, 0, sizeof(entry->key));
+			px_memset(entry->key, 0, VARSIZE(entry->key));
 			pfree(entry->key);
 		}
 		if (entry->algorithm != NULL)
@@ -907,12 +914,13 @@ bytea *
 add_header_to_encrpt_data(bytea *encrypted_data)
 {
 	bytea	   *result = NULL;
+	short		key_ver = (short) current_key_version;
 
 	result = (bytea *) palloc(VARSIZE(encrypted_data) + sizeof(short));
 
-	/* add key header information to encrypted data */
+	/* add key version header to encrypted data */
 	SET_VARSIZE(result, VARSIZE(encrypted_data) + sizeof(short));
-	memcpy(VARDATA(result), &header, sizeof(short));
+	memcpy(VARDATA(result), &key_ver, sizeof(short));
 	memcpy((VARDATA(result) + sizeof(short)), VARDATA_ANY(encrypted_data),
 		   VARSIZE_ANY_EXHDR(encrypted_data));
 	return result;

@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: PostgreSQL ${{ matrix.pg_version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        pg_version: [14, 15, 16]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install PostgreSQL ${{ matrix.pg_version }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl ca-certificates
+          curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            | sudo gpg --dearmor -o /usr/share/keyrings/postgresql.gpg
+          echo "deb [signed-by=/usr/share/keyrings/postgresql.gpg] \
+            https://apt.postgresql.org/pub/repos/apt \
+            $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list
+          sudo apt-get update
+          sudo apt-get install -y \
+            postgresql-${{ matrix.pg_version }} \
+            postgresql-server-dev-${{ matrix.pg_version }} \
+            postgresql-${{ matrix.pg_version }}-pgcrypto
+
+      - name: Set pg_config path
+        run: echo "/usr/lib/postgresql/${{ matrix.pg_version }}/bin" >> $GITHUB_PATH
+
+      - name: Build extension
+        run: make
+
+      - name: Install extension
+        run: sudo make install
+
+      - name: Run regression tests
+        run: |
+          sudo -u postgres pg_ctlcluster ${{ matrix.pg_version }} main start || true
+          sudo -u postgres psql -c "ALTER SYSTEM SET shared_preload_libraries = 'column_encryption';"
+          sudo pg_ctlcluster ${{ matrix.pg_version }} main restart
+          sudo -u postgres make installcheck || (cat regression.diffs && exit 1)

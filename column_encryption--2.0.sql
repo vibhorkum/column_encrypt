@@ -1,4 +1,4 @@
-/* share/extension/column_encryption--1.0.sql */
+/* share/extension/column_encryption--2.0.sql */
 
  -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 
