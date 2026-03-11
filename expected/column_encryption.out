@@ -1,0 +1,94 @@
+ cipher_key_disable_log 
+------------------------
+ t
+(1 row)
+
+ register_cipher_key 
+---------------------
+                   1
+(1 row)
+
+ load_key 
+----------
+ t
+(1 row)
+
+CREATE TABLE
+INSERT 0 1
+INSERT 0 1
+     val      
+--------------
+ hello world
+ sensitive data 123
+(2 rows)
+
+CREATE TABLE
+INSERT 0 1
+INSERT 0 1
+     val      
+--------------
+ \xdeadbeef
+ \xcafebabe
+(2 rows)
+
+ self_equal 
+------------
+ t
+(1 row)
+
+CREATE ROLE
+ERROR:  parameter "encrypt.enable" cannot be changed now
+ERROR:  EDB-ENC0003 invalid cipher algorithm "bf", only "aes" is supported
+ enc_rm_prv_key 
+----------------
+ f
+(1 row)
+
+ enc_store_prv_key 
+-------------------
+ t
+(1 row)
+
+ enc_store_key 
+---------------
+ t
+(1 row)
+
+ cipher_key_disable_log 
+------------------------
+ t
+(1 row)
+
+ cipher_key_reencrypt_data 
+---------------------------
+                         2
+(1 row)
+
+ enc_rm_prv_key 
+----------------
+ t
+(1 row)
+
+     val      
+--------------
+ hello world
+ sensitive data 123
+(2 rows)
+
+ enc_rm_key 
+------------
+ t
+(1 row)
+
+ enc_rm_prv_key 
+----------------
+ f
+(1 row)
+
+ cipher_key_enable_log 
+-----------------------
+ t
+(1 row)
+
+DROP TABLE
+DROP TABLE

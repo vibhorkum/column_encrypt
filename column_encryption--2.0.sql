@@ -1,8 +1,8 @@
-/* share/extension/column_encryption--1.0.sql */
+/* share/extension/column_encryption--2.0.sql */
 
  -- complain if script is sourced in psql, rather than via CREATE EXTENSION
 
-\echo Use "CREATE EXTENSION column_encryption" to load this file. \quit
+\echo Use "CREATE EXTENSION column_encryption VERSION '2.0'" to load this file. \quit
 
 SET check_function_bodies TO off;
 

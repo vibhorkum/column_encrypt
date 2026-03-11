@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  build:
+    name: PostgreSQL ${{ matrix.pg_version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pg_version: [14, 15, 16]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL ${{ matrix.pg_version }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            postgresql-${{ matrix.pg_version }} \
+            postgresql-server-dev-${{ matrix.pg_version }} \
+            postgresql-${{ matrix.pg_version }}-pgcrypto
+
+      - name: Set PG_CONFIG
+        run: echo "PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config" >> $GITHUB_ENV
+
+      - name: Build extension
+        run: make PG_CONFIG=$PG_CONFIG
+
+      - name: Install extension
+        run: sudo make PG_CONFIG=$PG_CONFIG install
+
+      - name: Run regression tests
+        run: |
+          sudo -u postgres make PG_CONFIG=$PG_CONFIG installcheck || \
+            (cat regression.diffs && exit 1)
