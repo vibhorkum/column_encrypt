@@ -14,14 +14,55 @@
 #include "libpq/pqformat.h"
 #include "utils/memutils.h"
 #include "catalog/pg_collation.h"
-#include "access/hash.h"
-#include "libpq/pqformat.h"
-
-#include "px.h"
 
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
 #endif							/* END PG_MODULE_MAGIC */
+
+/*
+ * secure_memset - volatile memset to prevent compiler from optimizing away
+ * memory clearing of sensitive data (e.g. encryption keys).
+ */
+static void
+secure_memset(void *ptr, int c, size_t len)
+{
+	volatile char *p = (volatile char *) ptr;
+
+	while (len--)
+		*p++ = (char) c;
+}
+
+/*
+ * pgcrypto_encrypt_oid / pgcrypto_decrypt_oid
+ *
+ * Look up pgcrypto's pg_encrypt / pg_decrypt by their full signature at
+ * runtime (first call per session) instead of at link time.  This avoids
+ * an undefined-symbol error when column_encryption.so is loaded via
+ * shared_preload_libraries before any pgcrypto symbols are available.
+ */
+static Oid
+pgcrypto_encrypt_oid(void)
+{
+	static Oid	oid = InvalidOid;
+
+	if (!OidIsValid(oid))
+		oid = DatumGetObjectId(
+							   DirectFunctionCall1(regprocedurein,
+												   CStringGetDatum("encrypt(bytea,bytea,text)")));
+	return oid;
+}
+
+static Oid
+pgcrypto_decrypt_oid(void)
+{
+	static Oid	oid = InvalidOid;
+
+	if (!OidIsValid(oid))
+		oid = DatumGetObjectId(
+							   DirectFunctionCall1(regprocedurein,
+												   CStringGetDatum("decrypt(bytea,bytea,text)")));
+	return oid;
+}
 
 typedef struct
 {
@@ -31,8 +72,6 @@ typedef struct
 
 
 /* Function declarations */
-Datum		pg_encrypt(PG_FUNCTION_ARGS);
-Datum		pg_decrypt(PG_FUNCTION_ARGS);
 void		_PG_init(void);
 void		_PG_fini(void);
 
@@ -73,7 +112,7 @@ static bool encrypt_enable = true;
 
 
 /* whether mask mask_query_log query log or not */
-static bool mask_key_log = false;
+static bool mask_key_log = true;
 
 /* backup of log_min_error_statement value*/
 int			backup_log_min_error_statement = -1;
@@ -86,7 +125,9 @@ key_detail *current_key_detail = NULL;
 
 /* previous encryption key */
 key_detail *previous_key_detail = NULL;
-const short header = 1;
+
+/* current key version written into the ciphertext header */
+static int	current_key_version = 1;
 
 /* mask log messages */
 static void suppress_keylog_hook(ErrorData *);
@@ -112,7 +153,7 @@ _PG_init(void)
 							 "mask query log messages, string within () mark will be masked by *****",
 							 NULL,
 							 &mask_key_log,
-							 false,
+							 true,
 							 PGC_SUSET,
 							 0,
 							 NULL,
@@ -124,11 +165,24 @@ _PG_init(void)
 							 NULL,
 							 &encrypt_enable,
 							 true,
-							 PGC_USERSET,
+							 PGC_SUSET,
 							 0,
 							 NULL,
 							 NULL,
 							 NULL);
+
+	DefineCustomIntVariable("encrypt.key_version",
+							"Current encryption key version stored in ciphertext header.",
+							NULL,
+							&current_key_version,
+							1,		/* default */
+							1,		/* min */
+							32767,	/* max — fits in short */
+							PGC_SUSET,
+							0,
+							NULL,
+							NULL,
+							NULL);
 
 }
 
@@ -199,7 +253,6 @@ suppress_keylog_hook(ErrorData *edata)
 												   flag);
 			if (replaceMsg_tmp)
 			{
-				px_memset((void *) replaceMsg_tmp, 0, sizeof(replaceMsg_tmp));
 				pfree((void *) replaceMsg_tmp);
 			}
 			old_mem_context = MemoryContextSwitchTo(MessageContext);
@@ -223,11 +276,10 @@ suppress_keylog_hook(ErrorData *edata)
 												   flag);
 			if (replaceMsg_tmp)
 			{
-				px_memset((void *) replaceMsg_tmp, 0, sizeof(replaceMsg_tmp));
 				pfree((void *) replaceMsg_tmp);
 			}
 			/* do not leave anything relate to key info in memory */
-			px_memset(edata->message, 0, sizeof(edata->message));
+			secure_memset(edata->message, 0, strlen(edata->message) + 1);
 			pfree(edata->message);
 			edata->message = TextDatumGetCString(convertedMsg);
 			if (convertedMsg)
@@ -251,7 +303,6 @@ suppress_keylog_hook(ErrorData *edata)
 												   flag);
 			if (replaceMsg_tmp)
 			{
-				px_memset((void *) replaceMsg_tmp, 0, sizeof(replaceMsg_tmp));
 				pfree((void *) replaceMsg_tmp);
 			}
 
@@ -268,7 +319,6 @@ suppress_keylog_hook(ErrorData *edata)
 													 flag);
 			if (convertedMsg)
 			{
-				px_memset((void *) convertedMsg, 0, sizeof(convertedMsg));
 				pfree((void *) convertedMsg);
 			}
 			if (regex_param)
@@ -276,7 +326,7 @@ suppress_keylog_hook(ErrorData *edata)
 				pfree((void *) regex_param);
 			}
 			/* do not leave anything relate to key info in memory */
-			px_memset(edata->detail, 0, sizeof(edata->detail));
+			secure_memset(edata->detail, 0, strlen(edata->detail) + 1);
 			pfree(edata->detail);
 			edata->detail = TextDatumGetCString(replaceMsg_tmp);
 			if (replaceMsg_tmp)
@@ -300,11 +350,10 @@ suppress_keylog_hook(ErrorData *edata)
 												   flag);
 			if (replaceMsg_tmp)
 			{
-				px_memset((void *) replaceMsg_tmp, 0, sizeof(replaceMsg_tmp));
 				pfree((void *) replaceMsg_tmp);
 			}
 			/* do not leave anything relate to key info in memory */
-			px_memset(edata->internalquery, 0, sizeof(edata->internalquery));
+			secure_memset(edata->internalquery, 0, strlen(edata->internalquery) + 1);
 			pfree(edata->internalquery);
 			edata->internalquery = TextDatumGetCString(convertedMsg);
 			if (convertedMsg)
@@ -328,11 +377,10 @@ suppress_keylog_hook(ErrorData *edata)
 												   flag);
 			if (replaceMsg_tmp)
 			{
-				px_memset((void *) replaceMsg_tmp, 0, sizeof(replaceMsg_tmp));
 				pfree((void *) replaceMsg_tmp);
 			}
 			/* do not leave anything relate to key info in memory */
-			px_memset(edata->context, 0, sizeof(edata->context));
+			secure_memset(edata->context, 0, strlen(edata->context) + 1);
 			pfree(edata->context);
 			edata->context = TextDatumGetCString(convertedMsg);
 			if (convertedMsg)
@@ -755,8 +803,8 @@ remove_key_detail(key_detail * entry)
 	{
 		if (entry->key != NULL)
 		{
-			/* remove all info realted to in memory */
-			px_memset(entry->key, 0, sizeof(entry->key));
+			/* remove all info related to in memory */
+			secure_memset(entry->key, 0, VARSIZE(entry->key));
 			pfree(entry->key);
 		}
 		if (entry->algorithm != NULL)
@@ -880,9 +928,11 @@ pg_col_encrypt(bytea *input_data)
 		ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
 						errmsg("cannot encrypt data, because key was not set")));
 	}
-	encrypted_data = (bytea *) DatumGetPointer(DirectFunctionCall3(pg_encrypt,
-																   PointerGetDatum(input_data), PointerGetDatum(current_key_detail->key),
-																   PointerGetDatum(current_key_detail->algorithm)));
+	encrypted_data = (bytea *) DatumGetPointer(OidFunctionCall3(
+													pgcrypto_encrypt_oid(),
+													PointerGetDatum(input_data),
+													PointerGetDatum(current_key_detail->key),
+													PointerGetDatum(current_key_detail->algorithm)));
 	return encrypted_data;
 }
 
@@ -897,8 +947,10 @@ pg_col_decrypt(key_detail * entry, bytea *encrypted_data)
 		ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
 						errmsg("cannot decrypt data, because key was not set")));
 	}
-	result = DirectFunctionCall3(pg_decrypt, PointerGetDatum(encrypted_data),
-								 PointerGetDatum(entry->key), PointerGetDatum(entry->algorithm));
+	result = OidFunctionCall3(pgcrypto_decrypt_oid(),
+							  PointerGetDatum(encrypted_data),
+							  PointerGetDatum(entry->key),
+							  PointerGetDatum(entry->algorithm));
 	return result;
 }
 
@@ -907,12 +959,13 @@ bytea *
 add_header_to_encrpt_data(bytea *encrypted_data)
 {
 	bytea	   *result = NULL;
+	short		key_ver = (short) current_key_version;
 
 	result = (bytea *) palloc(VARSIZE(encrypted_data) + sizeof(short));
 
-	/* add key header information to encrypted data */
+	/* add key version header to encrypted data */
 	SET_VARSIZE(result, VARSIZE(encrypted_data) + sizeof(short));
-	memcpy(VARDATA(result), &header, sizeof(short));
+	memcpy(VARDATA(result), &key_ver, sizeof(short));
 	memcpy((VARDATA(result) + sizeof(short)), VARDATA_ANY(encrypted_data),
 		   VARSIZE_ANY_EXHDR(encrypted_data));
 	return result;

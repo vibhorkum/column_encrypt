@@ -29,16 +29,16 @@ psql -h server.hostname.org -p 5444 -c "CREATE EXTENSION column_encryption;" dbn
 
 ## How to use
 
-1. Connect to database using psql and register your key:
+1. Connect to database as a superuser and register your key using a separate master passphrase (Key Encryption Key):
 ```sql
 SELECT cipher_key_disable_log();
-SELECT register_cipher_key('AES-DBC-AEF-GHI-JKL','aes');
+SELECT register_cipher_key('AES-DBC-AEF-GHI-JKL', 'aes', 'my-master-passphrase');
 SELECT cipher_key_enable_log();
 ```
-2. After registering the key, reconnect to a session and load your key as given below:
+2. After registering the key, reconnect to a session and load your key using the master passphrase:
 ```sql
 SELECT cipher_key_disable_log();
-SELECT load_key('AES-DBC-AEF-GHI-JKL');
+SELECT load_key('my-master-passphrase');
 ```
 3.  Create a table using data encrypt_bytea/encrypt_text data-types and insert some records
 ```sql
@@ -71,21 +71,65 @@ test=# SELECT cipher_key_disable_log();
  t
 (1 row)
 
-test=# SELECT load_key('AES-DBC-AEF-GHI-JKI');
+test=# SELECT load_key('wrong-passphrase');
 ERROR:  EDB-ENC0012 cipher key is not correct
 ```
 Above was also expected because user tried to pass the wrong key.
 
-Module also comes with a parameter column_encrypt.encrypt_enable, which by default is on. If user disable this parameter he can query the table. However, will not be able to see the actual data. Example is given below:
+## Security
+
+### Key Encryption Key (KEK) vs Data Encryption Key (DEK)
+
+The extension uses a two-tier key model:
+- **Data Encryption Key (DEK)**: The key used to actually encrypt/decrypt column data. Stored in `cipher_key_table` in encrypted form.
+- **Key Encryption Key (KEK) / Master Passphrase**: Used to wrap (encrypt) the DEK before storing it in `cipher_key_table`. The KEK should be managed externally and never stored in the database.
+
+The `register_cipher_key(data_key, algorithm, master_passphrase)` function encrypts the DEK with the master passphrase using AES-256 with iterated-salted S2K (s2k-mode=3) before storing it. The `load_key(master_passphrase)` function decrypts the DEK into session memory using the master passphrase.
+
+### GUC Parameters
+
+- **`encrypt.enable`** (superuser only): Enables/disables column encryption. Requires superuser privileges to change. When off, raw ciphertext is stored/returned.
+- **`encrypt.mask_key_log`** (superuser only): When enabled (default: on), masks query log messages matching `(...)` patterns to prevent key material from appearing in logs.
+- **`encrypt.key_version`** (superuser only): The key version number written into the ciphertext header. Default: 1. Range: 1–32767.
+
+### `cipher_key_table` Access Control
+
+The `cipher_key_table` has restricted access:
+- `REVOKE ALL` from `PUBLIC`
+- Row-Level Security enabled with a policy allowing only superusers to query it directly
+- All key operations go through `SECURITY DEFINER` functions
+
+### `encrypt.enable` requires superuser
+
+The `encrypt.enable` GUC is `PGC_SUSET` — only superusers can change it. This prevents non-privileged users from bypassing encryption.
+
+## Key Rotation
+
+To rotate the encryption key:
+
 ```sql
-test=# set encrypt.encrypt_enable to off;
-SET
-test=# select * from secure_data;
- id |                  ssn                   
-----+----------------------------------------
-  1 | \x0100cbac671c440c886ad3ab907d7d126f90
-  2 | \x0100c9536857474fb70f9725e872ec1fc05b
-  3 | \x0100002ffb04d15227b9f72431ab507c313a
-(3 rows)
+-- Step 1: Load old and new keys
+SELECT cipher_key_disable_log();
+
+-- Store the current (old) key as the previous key
+SELECT enc_store_prv_key('old-data-key', 'aes');
+
+-- Store the new data key as the current key
+SELECT enc_store_key('new-data-key', 'aes');
+
+-- Step 2: Re-encrypt all data in the encrypted column
+SELECT cipher_key_reencrypt_data('public', 'secure_data', 'ssn');
+
+-- Step 3: Update cipher_key_table with the new key wrapped by the new master passphrase
+DELETE FROM cipher_key_table;
+SELECT register_cipher_key('new-data-key', 'aes', 'new-master-passphrase');
+
+-- Step 4: Clear keys from memory
+SELECT enc_rm_prv_key();
+SELECT enc_rm_key();
+
+SELECT cipher_key_enable_log();
 ```
+
+After rotation, users must call `load_key('new-master-passphrase')` in new sessions.
 
