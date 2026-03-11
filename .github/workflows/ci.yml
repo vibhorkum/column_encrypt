@@ -15,8 +15,9 @@ jobs:
     runs-on: ubuntu-latest
 
     strategy:
+      fail-fast: false
       matrix:
-        pg_version: [14, 15, 16]
+        pg_version: [14, 15, 16, 17, 18]
 
     steps:
       - name: Checkout repository
@@ -36,7 +37,7 @@ jobs:
           sudo apt-get install -y \
             postgresql-${{ matrix.pg_version }} \
             postgresql-server-dev-${{ matrix.pg_version }} \
-            postgresql-${{ matrix.pg_version }}-pgcrypto
+            postgresql-contrib-${{ matrix.pg_version }}
 
       - name: Set pg_config path
         run: echo "/usr/lib/postgresql/${{ matrix.pg_version }}/bin" >> $GITHUB_PATH
@@ -49,7 +50,11 @@ jobs:
 
       - name: Run regression tests
         run: |
-          sudo -u postgres pg_ctlcluster ${{ matrix.pg_version }} main start || true
-          sudo -u postgres psql -c "ALTER SYSTEM SET shared_preload_libraries = 'column_encryption';"
-          sudo pg_ctlcluster ${{ matrix.pg_version }} main restart
-          sudo -u postgres make installcheck || (cat regression.diffs && exit 1)
+          export PGDATA=$(mktemp -d)
+          initdb --no-locale -E UTF8 "$PGDATA"
+          echo "shared_preload_libraries = 'column_encryption'" >> "$PGDATA/postgresql.conf"
+          pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" start
+          createdb test_column_encryption
+          make installcheck PGDATABASE=test_column_encryption || \
+            (cat regression.diffs && pg_ctl -D "$PGDATA" stop && exit 1)
+          pg_ctl -D "$PGDATA" stop
