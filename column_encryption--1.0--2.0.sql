@@ -83,7 +83,7 @@ BEGIN
 
 	SELECT count(*) INTO f_key_num FROM cipher_key_table;
 	IF f_key_num = 1 THEN
-		RAISE EXCEPTION 'EDB-ENC0009 a cypher encryption keys are exists in cipher_key_table';
+		RAISE EXCEPTION 'EDB-ENC0009 a cipher encryption key already exists in cipher_key_table';
 	END IF;
 
 	INSERT INTO cipher_key_table(key, algorithm)
