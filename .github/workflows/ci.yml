@@ -46,7 +46,7 @@ jobs:
         run: make
 
       - name: Install extension
-        run: sudo make install
+        run: sudo make install PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg_version }}/bin/pg_config
 
       - name: Run regression tests
         run: |
