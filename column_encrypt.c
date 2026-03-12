@@ -80,6 +80,7 @@ Datum		pg_col_decrypt(key_detail * entry, bytea *encrypted_data);
 bytea	   *add_header_to_encrpt_data(bytea *encrypted_data);
 bytea	   *rm_header_frm_encrpt_input(bytea *input_data);
 bool		binary_comparison(bytea *barg1, bytea *barg2);
+int			binary_cmp(bytea *barg1, bytea *barg2);
 
 
 key_detail *create_key_detail(text *key, text *algorithm);
@@ -99,6 +100,7 @@ PG_FUNCTION_INFO_V1(inet_enc_text);
 PG_FUNCTION_INFO_V1(xml_enc_text);
 PG_FUNCTION_INFO_V1(enc_text_regclass);
 PG_FUNCTION_INFO_V1(enc_hash_encrted_data);
+PG_FUNCTION_INFO_V1(enc_btree_cmp_encrted_data);
 PG_FUNCTION_INFO_V1(enc_store_key);
 PG_FUNCTION_INFO_V1(enc_store_prv_key);
 PG_FUNCTION_INFO_V1(enc_rm_key);
@@ -759,6 +761,32 @@ enc_hash_encrted_data(PG_FUNCTION_ARGS)
 
 
 /*
+ * Function : enc_btree_cmp_encrted_data
+ * --------------------------------------
+ * btree comparison function for encrypted data (text/binary).
+ * Returns negative, 0, or positive based on memcmp of the raw ciphertext.
+ *
+ * @param    varlena ARG[0]    left operand
+ * @param    varlena ARG[1]    right operand
+ * @return   int32             comparison result
+ */
+Datum
+enc_btree_cmp_encrted_data(PG_FUNCTION_ARGS)
+{
+	bytea	   *barg1 = PG_GETARG_BYTEA_PP(0);
+	bytea	   *barg2 = PG_GETARG_BYTEA_PP(1);
+	int			result;
+
+	result = binary_cmp(barg1, barg2);
+
+	PG_FREE_IF_COPY(barg1, 0);
+	PG_FREE_IF_COPY(barg2, 1);
+
+	PG_RETURN_INT32(result);
+}
+
+
+/*
  * Function : create_key_detail
  * -----------------------------
  * returns key details
@@ -1058,6 +1086,26 @@ binary_comparison(bytea *barg1, bytea *barg2)
 	else
 	{
 		result = (memcmp(VARDATA_ANY(barg1), VARDATA_ANY(barg2), len1) == 0);
+	}
+	return result;
+}
+
+
+/* return negative, 0, or positive comparing binary arg1 and arg2 */
+int
+binary_cmp(bytea *barg1, bytea *barg2)
+{
+	int			len1 = VARSIZE_ANY_EXHDR(barg1);
+	int			len2 = VARSIZE_ANY_EXHDR(barg2);
+	int			result;
+
+	result = memcmp(VARDATA_ANY(barg1), VARDATA_ANY(barg2), Min(len1, len2));
+	if (result == 0)
+	{
+		if (len1 < len2)
+			result = -1;
+		else if (len1 > len2)
+			result = 1;
 	}
 	return result;
 }
