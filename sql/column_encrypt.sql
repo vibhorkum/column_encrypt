@@ -56,5 +56,20 @@ SELECT COUNT(*) FROM test_eq WHERE val = 'secret'::encrypted_text;
 
 DROP TABLE test_eq;
 
+--
+-- UNIQUE constraint on encrypted_text (btree operator class)
+--
+CREATE TABLE test_unique_enc (id serial, val encrypted_text UNIQUE);
+INSERT INTO test_unique_enc(val) VALUES ('alpha');
+INSERT INTO test_unique_enc(val) VALUES ('beta');
+
+-- Should fail: duplicate value
+INSERT INTO test_unique_enc(val) VALUES ('alpha');
+
+-- Should have exactly 2 rows
+SELECT COUNT(*) FROM test_unique_enc;
+
+DROP TABLE test_unique_enc;
+
 -- Clear the key from memory
 SELECT rm_key_details();
