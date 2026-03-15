@@ -739,12 +739,19 @@ enc_hash_encrted_data(PG_FUNCTION_ARGS)
 
 	Datum		result;
 
-	plain = decrypt_ciphertext(cipher);
-	result = hash_any((unsigned char *) VARDATA_ANY(plain),
+	if (encrypt_enable)
+	{
+		plain = decrypt_ciphertext(cipher);
+		result = hash_any((unsigned char *) VARDATA_ANY(plain),
 					  VARSIZE_ANY_EXHDR(plain));
+		pfree(plain);
+	}
+	else
+	{
+		result = hash_any((unsigned char *) VARDATA_ANY(cipher),
+					  VARSIZE_ANY_EXHDR(cipher));
+	}
 
-	/* avoiding leaking memory for toasted input */
-	pfree(plain);
 	PG_FREE_IF_COPY(cipher, 0);
 
 	return result;
@@ -1144,6 +1151,7 @@ col_enc_recv(PG_FUNCTION_ARGS)
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("binary protocol is not supported for encrypted types")));
+	PG_RETURN_NULL();
 }
 
 /*
@@ -1157,6 +1165,7 @@ col_enc_send(PG_FUNCTION_ARGS)
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 			 errmsg("binary protocol is not supported for encrypted types")));
+	PG_RETURN_NULL();
 }
 
 

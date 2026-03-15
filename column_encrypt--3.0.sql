@@ -624,7 +624,7 @@ BEGIN
 		END IF;
 
 			BEGIN
-				PERFORM set_config('encrypt.key_version', key_version::text, true)
+				PERFORM set_config('encrypt.key_version', key_version::text, false)
             FROM cipher_key_table
             WHERE key_state = 'active';
 
@@ -635,7 +635,7 @@ BEGIN
 				WHEN OTHERS THEN
 					PERFORM enc_rm_key();
                     IF old_key_version IS NOT NULL THEN
-                        PERFORM set_config('encrypt.key_version', old_key_version, true);
+                        PERFORM set_config('encrypt.key_version', old_key_version, false);
                     END IF;
 					RAISE EXCEPTION 'EDB-ENC0012 cipher key is not correct';
 			END;
@@ -670,21 +670,24 @@ BEGIN
     PERFORM pgstat_actv_mask();
 
     BEGIN
-        PERFORM set_config('encrypt.key_version', requested_version::text, true);
+        PERFORM set_config('encrypt.key_version', requested_version::text, false);
         PERFORM enc_store_key(pgp_sym_decrypt(wrapped_key, master_passphrase), algorithm)
           FROM cipher_key_table
          WHERE key_version = requested_version
            AND key_state <> 'revoked';
         IF NOT FOUND THEN
             IF old_key_version IS NOT NULL THEN
-                PERFORM set_config('encrypt.key_version', old_key_version, true);
+                PERFORM set_config('encrypt.key_version', old_key_version, false);
             END IF;
             RETURN FALSE;
+        END IF;
+        IF old_key_version IS NOT NULL THEN
+            PERFORM set_config('encrypt.key_version', old_key_version, false);
         END IF;
     EXCEPTION
         WHEN OTHERS THEN
             IF old_key_version IS NOT NULL THEN
-                PERFORM set_config('encrypt.key_version', old_key_version, true);
+                PERFORM set_config('encrypt.key_version', old_key_version, false);
             END IF;
             RAISE EXCEPTION 'EDB-ENC0012 cipher key is not correct';
     END;

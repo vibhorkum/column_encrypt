@@ -260,7 +260,7 @@ All parameters require **superuser** (`PGC_SUSET`) to change.
 | Parameter | Type | Default | Range | Description |
 |---|---|---|---|---|
 | `encrypt.enable` | `bool` | `on` | — | Enables or disables column encryption globally. This is independent from the log masking helper functions. |
-| `encrypt.mask_key_log` | `bool` | `on` | — | When enabled, masks `(...)` patterns in PostgreSQL log messages (query, detail, context, internal query) to prevent key material from leaking into logs. |
+| `encrypt.mask_key_log` | `bool` | `on` | — | When enabled, masks known sensitive key-management function calls in PostgreSQL log messages as a defense-in-depth control. |
 | `encrypt.key_version` | `int` | `1` | `1–32767` | Key version number written into the 2-byte ciphertext header. Increment this when rotating keys to track which version encrypted each value. |
 
 ---

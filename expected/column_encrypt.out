@@ -224,6 +224,7 @@ SELECT cipher_key_enable_log();
 (1 row)
 
 RESET ROLE;
+SET encrypt.key_version = 1;
 SET ROLE regress_runtime;
 SELECT load_key_by_version('my-master-passphrase', 1);
  load_key_by_version 
@@ -235,6 +236,12 @@ SELECT load_key_by_version('my-master-passphrase', 2);
  load_key_by_version 
 ---------------------
  t
+(1 row)
+
+SHOW encrypt.key_version;
+ encrypt.key_version 
+---------------------
+ 1
 (1 row)
 
 RESET ROLE;

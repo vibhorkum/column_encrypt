@@ -126,9 +126,11 @@ SELECT register_cipher_key('my-data-encryption-key-v2', 'aes', 'my-master-passph
 SELECT cipher_key_enable_log();
 RESET ROLE;
 
+SET encrypt.key_version = 1;
 SET ROLE regress_runtime;
 SELECT load_key_by_version('my-master-passphrase', 1);
 SELECT load_key_by_version('my-master-passphrase', 2);
+SHOW encrypt.key_version;
 RESET ROLE;
 
 SET encrypt.key_version = 1;
