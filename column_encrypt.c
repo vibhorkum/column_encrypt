@@ -15,6 +15,7 @@
 #include "utils/memutils.h"
 #include "catalog/pg_collation.h"
 #include "utils/array.h"
+#include "port/pg_bswap.h"
 
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
@@ -594,12 +595,18 @@ col_enc_comp_eq_text(PG_FUNCTION_ARGS)
 	bytea	   *plain2 = NULL;
 	bool		result;
 
-	plain1 = decrypt_ciphertext(barg1);
-	plain2 = decrypt_ciphertext(barg2);
-	result = binary_comparison(plain1, plain2);
-
-	pfree(plain1);
-	pfree(plain2);
+	if (encrypt_enable)
+	{
+		plain1 = decrypt_ciphertext(barg1);
+		plain2 = decrypt_ciphertext(barg2);
+		result = binary_comparison(plain1, plain2);
+		pfree(plain1);
+		pfree(plain2);
+	}
+	else
+	{
+		result = binary_comparison(barg1, barg2);
+	}
 
 	PG_FREE_IF_COPY(barg1, 0);
 	PG_FREE_IF_COPY(barg2, 1);
@@ -627,12 +634,18 @@ col_enc_comp_eq_bytea(PG_FUNCTION_ARGS)
 	bytea	   *plain2 = NULL;
 	bool		result;
 
-	plain1 = decrypt_ciphertext(barg1);
-	plain2 = decrypt_ciphertext(barg2);
-	result = binary_comparison(plain1, plain2);
-
-	pfree(plain1);
-	pfree(plain2);
+	if (encrypt_enable)
+	{
+		plain1 = decrypt_ciphertext(barg1);
+		plain2 = decrypt_ciphertext(barg2);
+		result = binary_comparison(plain1, plain2);
+		pfree(plain1);
+		pfree(plain2);
+	}
+	else
+	{
+		result = binary_comparison(barg1, barg2);
+	}
 
 	PG_FREE_IF_COPY(barg1, 0);
 	PG_FREE_IF_COPY(barg2, 1);
@@ -959,11 +972,13 @@ enc_store_key(PG_FUNCTION_ARGS)
 /*
  * Function : enc_store_prv_key
  * -----------------------------------------
- * regist previous_key_detail
+ * Deprecated compatibility alias for enc_store_key().
+ * Stores the provided key under the current encrypt.key_version;
+ * it no longer writes to a distinct "previous" slot.
  *
- * @param    *text ARG[0]    old encryption key
- * @param    *text ARG[1]    old encryption algorithm
- * @return    address of old key information in variable
+ * @param    *text ARG[0]    encryption key
+ * @param    *text ARG[1]    encryption algorithm
+ * @return   true when the key is stored in the session keyring
  *
  */
 
@@ -1059,19 +1074,19 @@ pg_col_decrypt(key_detail * entry, bytea *encrypted_data)
 	return result;
 }
 
-/* add header to encrypted data */
+/* add a portable big-endian 2-byte version header to encrypted data */
 bytea *
 add_header_to_encrpt_data(bytea *encrypted_data)
 {
 	bytea	   *result = NULL;
-	short		key_ver = (short) current_key_version;
+	uint16		key_ver = pg_hton16((uint16) current_key_version);
 
-	result = (bytea *) palloc(VARSIZE(encrypted_data) + sizeof(short));
+	result = (bytea *) palloc(VARSIZE(encrypted_data) + sizeof(uint16));
 
 	/* add key version header to encrypted data */
-	SET_VARSIZE(result, VARSIZE(encrypted_data) + sizeof(short));
-	memcpy(VARDATA(result), &key_ver, sizeof(short));
-	memcpy((VARDATA(result) + sizeof(short)), VARDATA_ANY(encrypted_data),
+	SET_VARSIZE(result, VARSIZE(encrypted_data) + sizeof(uint16));
+	memcpy(VARDATA(result), &key_ver, sizeof(uint16));
+	memcpy((VARDATA(result) + sizeof(uint16)), VARDATA_ANY(encrypted_data),
 		   VARSIZE_ANY_EXHDR(encrypted_data));
 	return result;
 }
@@ -1083,20 +1098,20 @@ rm_header_frm_encrpt_input(bytea *input_data)
 	bytea	   *encrypted_data = NULL;
 	int			payload_len;
 
-	if (VARSIZE_ANY_EXHDR(input_data) <= (int) sizeof(short))
+	if (VARSIZE_ANY_EXHDR(input_data) <= (int) sizeof(uint16))
 	{
 		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
 						errmsg("encrypted value is malformed: missing ciphertext payload")));
 	}
 
-	payload_len = VARSIZE_ANY_EXHDR(input_data) - sizeof(short);
+	payload_len = VARSIZE_ANY_EXHDR(input_data) - sizeof(uint16);
 
 	/* remove version from input data */
 	encrypted_data = (bytea *) palloc(
 									  payload_len + VARHDRSZ);
 	SET_VARSIZE(encrypted_data,
 				payload_len + VARHDRSZ);
-	memcpy(VARDATA(encrypted_data), (VARDATA_ANY(input_data) + sizeof(short)),
+	memcpy(VARDATA(encrypted_data), (VARDATA_ANY(input_data) + sizeof(uint16)),
 		   payload_len);
 	return encrypted_data;
 }
@@ -1104,15 +1119,16 @@ rm_header_frm_encrpt_input(bytea *input_data)
 int
 extract_key_version(bytea *input_data)
 {
-	short		key_ver;
+	uint16		key_ver;
 
-	if (VARSIZE_ANY_EXHDR(input_data) < (int) sizeof(short))
+	if (VARSIZE_ANY_EXHDR(input_data) < (int) sizeof(uint16))
 	{
 		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
 						errmsg("encrypted value is malformed: missing key version header")));
 	}
 
-	memcpy(&key_ver, VARDATA_ANY(input_data), sizeof(short));
+	memcpy(&key_ver, VARDATA_ANY(input_data), sizeof(uint16));
+	key_ver = pg_ntoh16(key_ver);
 	if (key_ver <= 0)
 	{
 		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),

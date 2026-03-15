@@ -120,6 +120,18 @@ SELECT loaded_cipher_key_versions();
 SELECT col_enc_send_text('123-45-6789'::encrypted_text);
 SELECT col_enc_send_bytea('hello'::encrypted_bytea);
 
+SET encrypt.enable = off;
+CREATE TABLE test_off_mode_text (id serial, val encrypted_text);
+INSERT INTO test_off_mode_text(val) VALUES ('alpha'), ('beta');
+SELECT COUNT(*) FROM test_off_mode_text WHERE val = 'alpha'::encrypted_text;
+SELECT enc_hash_enctext('alpha'::encrypted_text) = enc_hash_enctext('alpha'::encrypted_text);
+
+CREATE TABLE test_off_mode_bytea (id serial, val encrypted_bytea);
+INSERT INTO test_off_mode_bytea(val) VALUES ('abc'::bytea), ('xyz'::bytea);
+SELECT COUNT(*) FROM test_off_mode_bytea WHERE val = 'abc'::encrypted_bytea;
+SELECT enc_hash_encbytea('abc'::encrypted_bytea) = enc_hash_encbytea('abc'::encrypted_bytea);
+SET encrypt.enable = on;
+
 SET ROLE regress_admin;
 SELECT cipher_key_disable_log();
 SELECT register_cipher_key('my-data-encryption-key-v2', 'aes', 'my-master-passphrase', 2, false);
@@ -211,8 +223,13 @@ RESET ROLE;
 
 SELECT COUNT(*) FROM cipher_key_logical_replication_check('public', 'test_enc_text');
 
+ALTER TABLE test_batch_rotate REPLICA IDENTITY FULL;
+SELECT COUNT(*) FROM cipher_key_logical_replication_check('public', 'test_batch_rotate');
+
 DROP TABLE test_enc_text;
 DROP TABLE test_enc_bytea;
 DROP TABLE test_batch_rotate;
+DROP TABLE test_off_mode_text;
+DROP TABLE test_off_mode_bytea;
 
 SELECT rm_key_details();

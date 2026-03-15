@@ -75,6 +75,9 @@ CREATE FUNCTION loaded_cipher_key_versions() RETURNS integer[]
 LANGUAGE c STABLE
 AS 'column_encrypt', 'enc_loaded_key_versions';
 
+ALTER FUNCTION public.enc_hash_encbytea(public.encrypted_bytea) STABLE;
+ALTER FUNCTION public.enc_hash_enctext(public.encrypted_text) STABLE;
+
 CREATE OR REPLACE FUNCTION cipher_key_disable_log() RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO public
@@ -515,6 +518,7 @@ DECLARE
     p_table ALIAS FOR $2;
     encrypted_column_count integer;
     replica_identity_uses_encrypted boolean;
+    replica_identity_full boolean;
 BEGIN
     RETURN QUERY
     SELECT
@@ -556,12 +560,28 @@ BEGIN
            AND t.typname IN ('encrypted_text', 'encrypted_bytea')
     ) INTO replica_identity_uses_encrypted;
 
+    SELECT c.relreplident = 'f'
+      INTO replica_identity_full
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = p_schema
+       AND c.relname = p_table;
+
     RETURN QUERY
     SELECT
-        CASE WHEN replica_identity_uses_encrypted THEN 'warning' ELSE 'info' END,
-        'replica_identity',
-        CASE WHEN replica_identity_uses_encrypted THEN 'check' ELSE 'ok' END,
         CASE
+            WHEN replica_identity_full AND encrypted_column_count > 0 THEN 'warning'
+            WHEN replica_identity_uses_encrypted THEN 'warning'
+            ELSE 'info'
+        END,
+        'replica_identity',
+        CASE
+            WHEN replica_identity_full AND encrypted_column_count > 0 THEN 'check'
+            WHEN replica_identity_uses_encrypted THEN 'check'
+            ELSE 'ok'
+        END,
+        CASE
+            WHEN replica_identity_full AND encrypted_column_count > 0 THEN 'replica identity is FULL and encrypted columns will participate in subscriber row matching; confirm ciphertext replication semantics and key availability'
             WHEN replica_identity_uses_encrypted THEN 'replica identity includes encrypted columns; confirm subscriber semantics and key availability'
             ELSE 'replica identity does not include encrypted columns'
         END;

@@ -68,6 +68,7 @@ The extension registers two custom base types (`encrypted_text`, `encrypted_byte
 - Binary protocol `SEND` / `RECEIVE` is intentionally rejected so clients cannot bypass the text I/O encryption path.
 - Equality and hash behavior are defined on **decrypted plaintext**, not raw ciphertext bytes.
 - Range ordering on encrypted values is intentionally **unsupported**; use companion blind indexes for scalable equality lookups instead.
+- Because equality/hash behavior depends on decrypted plaintext and session key availability, blind-index columns are the recommended pattern for indexed equality at scale.
 
 ---
 
@@ -238,11 +239,11 @@ This is also expected — an incorrect passphrase is rejected.
 | `loaded_cipher_key_versions()` | `integer[]` | Returns the key versions currently loaded into the backend session keyring, without exposing key material. |
 | `cipher_key_disable_log()` | `boolean` | Disables `track_activities` before sensitive key operations. |
 | `cipher_key_enable_log()` | `boolean` | Re-enables `track_activities` after sensitive key operations. |
-| `enc_store_key(key text, algorithm text)` | `boolean` | Directly stores the current DEK in session memory (used during key rotation). |
-| `enc_store_prv_key(key text, algorithm text)` | `boolean` | Stores the previous DEK in session memory (used during key rotation). |
+| `enc_store_key(key text, algorithm text)` | `boolean` | Low-level helper that stores a DEK in session memory under the current `encrypt.key_version`. |
+| `enc_store_prv_key(key text, algorithm text)` | `boolean` | Deprecated compatibility alias for `enc_store_key(...)`; it no longer stores a distinct “previous” version. |
 | `enc_rm_key()` | `boolean` | Securely removes all loaded DEKs from session memory (zeroes the key bytes). |
 | `enc_rm_prv_key()` | `boolean` | Compatibility alias for clearing the loaded keyring. |
-| `cipher_key_reencrypt_data(schema text, table text, column text)` | `bigint` | Re-encrypts all values in the specified encrypted column using the new key (reads with previous key, writes with current key). Returns the number of rows re-encrypted. |
+| `cipher_key_reencrypt_data(schema text, table text, column text)` | `bigint` | Re-encrypts all values in the specified encrypted column by decrypting with the ciphertext header version and re-encrypting with the current `encrypt.key_version`. Returns the number of rows re-encrypted. |
 | `cipher_key_reencrypt_data_batch(schema text, table text, column text, batch_size integer)` | `bigint` | Re-encrypts a bounded batch of rows at a time so callers can rotate large tables incrementally. |
 | `activate_cipher_key(key_version integer)` | `boolean` | Marks one registered key version as active and retires the previously active version. |
 | `revoke_cipher_key(key_version integer)` | `boolean` | Marks a stored key version as revoked so it can no longer be loaded. |

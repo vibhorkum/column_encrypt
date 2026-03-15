@@ -211,14 +211,14 @@ JOIN = eqjoinsel
  */
 
 CREATE FUNCTION enc_hash_encbytea(encrypted_bytea) RETURNS integer
-LANGUAGE c IMMUTABLE STRICT
+LANGUAGE c STABLE STRICT
 AS 'column_encrypt', 'enc_hash_encrted_data';
 
 /*
  * hash function for encrypted text
  */
 CREATE FUNCTION enc_hash_enctext(encrypted_text) RETURNS integer
-LANGUAGE c IMMUTABLE STRICT
+LANGUAGE c STABLE STRICT
 AS 'column_encrypt', 'enc_hash_encrted_data';
 
 CREATE FUNCTION enc_key_version(encrypted_text) RETURNS integer
@@ -820,7 +820,9 @@ $$;
 -- Name: cipher_key_reencrypt_data(text, text, text); Type: FUNCTION
 -- Args: schema_name, table_name, column_name
 -- Re-encrypts all values in the specified encrypted column using the current key.
--- Requires: enc_store_prv_key() loaded with old key, enc_store_key() loaded with new key.
+-- Requires: the relevant ciphertext versions to be loaded in the session keyring
+-- (for example via load_key_by_version()), and encrypt.key_version set to the
+-- destination version to be written into new ciphertext headers.
 -- Returns: number of rows re-encrypted.
 --
 
@@ -984,6 +986,7 @@ DECLARE
     p_table ALIAS FOR $2;
     encrypted_column_count integer;
     replica_identity_uses_encrypted boolean;
+    replica_identity_full boolean;
 BEGIN
     RETURN QUERY
     SELECT
@@ -1025,12 +1028,28 @@ BEGIN
            AND t.typname IN ('encrypted_text', 'encrypted_bytea')
     ) INTO replica_identity_uses_encrypted;
 
+    SELECT c.relreplident = 'f'
+      INTO replica_identity_full
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = p_schema
+       AND c.relname = p_table;
+
     RETURN QUERY
     SELECT
-        CASE WHEN replica_identity_uses_encrypted THEN 'warning' ELSE 'info' END,
-        'replica_identity',
-        CASE WHEN replica_identity_uses_encrypted THEN 'check' ELSE 'ok' END,
         CASE
+            WHEN replica_identity_full AND encrypted_column_count > 0 THEN 'warning'
+            WHEN replica_identity_uses_encrypted THEN 'warning'
+            ELSE 'info'
+        END,
+        'replica_identity',
+        CASE
+            WHEN replica_identity_full AND encrypted_column_count > 0 THEN 'check'
+            WHEN replica_identity_uses_encrypted THEN 'check'
+            ELSE 'ok'
+        END,
+        CASE
+            WHEN replica_identity_full AND encrypted_column_count > 0 THEN 'replica identity is FULL and encrypted columns will participate in subscriber row matching; confirm ciphertext replication semantics and key availability'
             WHEN replica_identity_uses_encrypted THEN 'replica identity includes encrypted columns; confirm subscriber semantics and key availability'
             ELSE 'replica identity does not include encrypted columns'
         END;

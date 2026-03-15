@@ -204,6 +204,36 @@ SELECT col_enc_send_text('123-45-6789'::encrypted_text);
 ERROR:  binary protocol is not supported for encrypted types
 SELECT col_enc_send_bytea('hello'::encrypted_bytea);
 ERROR:  binary protocol is not supported for encrypted types
+SET encrypt.enable = off;
+CREATE TABLE test_off_mode_text (id serial, val encrypted_text);
+INSERT INTO test_off_mode_text(val) VALUES ('alpha'), ('beta');
+SELECT COUNT(*) FROM test_off_mode_text WHERE val = 'alpha'::encrypted_text;
+ count 
+-------
+     1
+(1 row)
+
+SELECT enc_hash_enctext('alpha'::encrypted_text) = enc_hash_enctext('alpha'::encrypted_text);
+ ?column? 
+----------
+ t
+(1 row)
+
+CREATE TABLE test_off_mode_bytea (id serial, val encrypted_bytea);
+INSERT INTO test_off_mode_bytea(val) VALUES ('abc'::bytea), ('xyz'::bytea);
+SELECT COUNT(*) FROM test_off_mode_bytea WHERE val = 'abc'::encrypted_bytea;
+ count 
+-------
+     1
+(1 row)
+
+SELECT enc_hash_encbytea('abc'::encrypted_bytea) = enc_hash_encbytea('abc'::encrypted_bytea);
+ ?column? 
+----------
+ t
+(1 row)
+
+SET encrypt.enable = on;
 SET ROLE regress_admin;
 SELECT cipher_key_disable_log();
  cipher_key_disable_log 
@@ -421,9 +451,18 @@ SELECT COUNT(*) FROM cipher_key_logical_replication_check('public', 'test_enc_te
      4
 (1 row)
 
+ALTER TABLE test_batch_rotate REPLICA IDENTITY FULL;
+SELECT COUNT(*) FROM cipher_key_logical_replication_check('public', 'test_batch_rotate');
+ count 
+-------
+     4
+(1 row)
+
 DROP TABLE test_enc_text;
 DROP TABLE test_enc_bytea;
 DROP TABLE test_batch_rotate;
+DROP TABLE test_off_mode_text;
+DROP TABLE test_off_mode_bytea;
 SELECT rm_key_details();
  rm_key_details 
 ----------------
