@@ -69,6 +69,7 @@ The extension registers two custom base types (`encrypted_text`, `encrypted_byte
 - Equality and hash behavior are defined on **decrypted plaintext**, not raw ciphertext bytes.
 - Range ordering on encrypted values is intentionally **unsupported**; use companion blind indexes for scalable equality lookups instead.
 - Because equality/hash behavior depends on decrypted plaintext and session key availability, blind-index columns are the recommended pattern for indexed equality at scale.
+- When upgrading from releases that used ciphertext-based hash semantics, rebuild any existing hash indexes on encrypted columns before relying on them again.
 
 ---
 
@@ -107,6 +108,13 @@ The extension registers two custom base types (`encrypted_text`, `encrypted_byte
    ```sql
    CREATE EXTENSION column_encrypt;
    ```
+
+### Upgrade Notes
+
+- `3.0` changes equality and hash semantics to operate on decrypted plaintext instead of raw ciphertext bytes.
+- After `ALTER EXTENSION column_encrypt UPDATE TO '3.0'`, rebuild any existing hash indexes on `encrypted_text` or `encrypted_bytea` columns with `REINDEX` or by dropping and recreating them.
+- For scalable equality lookups or uniqueness checks, prefer a companion blind-index column instead of direct encrypted-column hash indexing.
+- This is especially important when `encrypt.enable = off` is used in logical replication or apply workflows, because blind indexes avoid dependence on session key availability.
 
 ---
 
@@ -276,7 +284,7 @@ All parameters require **superuser** (`PGC_SUSET`) to change.
 - **`encrypt.enable`** is `PGC_SUSET` — only superusers can enable or disable encryption. This prevents unprivileged users from bypassing encryption by toggling the GUC.
 - Low-level helper functions such as `enc_store_key`, `enc_store_prv_key`, and `pgstat_actv_mask` are revoked from `PUBLIC`.
 - Encryption keys stored in C session memory are **zeroed with `secure_memset`** when removed, preventing key material from lingering in process memory.
-- The **`emit_log_hook`** only targets known sensitive key-management function calls. It is a defense-in-depth measure, not a substitute for cautious operational handling of passphrases.
+- The **`emit_log_hook`** only targets known sensitive key-management function calls, and its redaction runs after earlier hooks so masking remains the final step. It is a defense-in-depth measure, not a substitute for cautious operational handling of passphrases.
 - `loaded_cipher_key_versions()` is safe to grant to runtime roles because it reveals version metadata only, not DEKs or passphrases.
 
 Example grants:

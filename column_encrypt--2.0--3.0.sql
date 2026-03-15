@@ -4,23 +4,88 @@
 
 SET check_function_bodies TO off;
 
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'cipher_key_table'
+           AND column_name = 'key_version'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.cipher_key_table ADD COLUMN key_version integer';
+    END IF;
+
+    IF EXISTS (
+        SELECT 1
+          FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'cipher_key_table'
+           AND column_name = 'key'
+    ) AND NOT EXISTS (
+        SELECT 1
+          FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'cipher_key_table'
+           AND column_name = 'wrapped_key'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.cipher_key_table RENAME COLUMN key TO wrapped_key';
+    ELSIF EXISTS (
+        SELECT 1
+          FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'cipher_key_table'
+           AND column_name = 'key'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.cipher_key_table ADD COLUMN IF NOT EXISTS wrapped_key bytea';
+        EXECUTE 'UPDATE public.cipher_key_table SET wrapped_key = COALESCE(wrapped_key, key)';
+        EXECUTE 'ALTER TABLE public.cipher_key_table DROP COLUMN key';
+    ELSIF NOT EXISTS (
+        SELECT 1
+          FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'cipher_key_table'
+           AND column_name = 'wrapped_key'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.cipher_key_table ADD COLUMN wrapped_key bytea';
+    END IF;
+END;
+$$;
+
 ALTER TABLE public.cipher_key_table
     ADD COLUMN IF NOT EXISTS key_state text,
     ADD COLUMN IF NOT EXISTS created_at timestamptz,
     ADD COLUMN IF NOT EXISTS state_changed_at timestamptz;
 
 UPDATE public.cipher_key_table
-   SET key_state = COALESCE(key_state, 'active'),
+   SET key_version = COALESCE(key_version, 1),
+       key_state = COALESCE(key_state, 'active'),
        created_at = COALESCE(created_at, now()),
        state_changed_at = COALESCE(state_changed_at, created_at, now());
 
 ALTER TABLE public.cipher_key_table
+    ALTER COLUMN key_version SET DEFAULT 1,
+    ALTER COLUMN key_version SET NOT NULL,
+    ALTER COLUMN wrapped_key SET NOT NULL,
     ALTER COLUMN key_state SET DEFAULT 'pending',
     ALTER COLUMN key_state SET NOT NULL,
     ALTER COLUMN created_at SET DEFAULT now(),
     ALTER COLUMN created_at SET NOT NULL,
     ALTER COLUMN state_changed_at SET DEFAULT now(),
     ALTER COLUMN state_changed_at SET NOT NULL;
+
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1
+          FROM pg_constraint
+         WHERE conrelid = 'public.cipher_key_table'::regclass
+           AND contype = 'p'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.cipher_key_table ADD CONSTRAINT cipher_key_table_pkey PRIMARY KEY (key_version)';
+    END IF;
+END;
+$$;
 
 ALTER TABLE public.cipher_key_table
     DROP CONSTRAINT IF EXISTS cipher_key_table_key_state_check;

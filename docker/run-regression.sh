@@ -57,6 +57,8 @@ pg_as_postgres pg_ctl -D "${PGDATA}" -l "${PGDATA}/postgres.log" -w start >/dev/
 pg_as_postgres createdb "${PGDATABASE}"
 pg_as_postgres psql -d "${PGDATABASE}" -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;" >/dev/null
 
+mkdir -p results
+
 make installcheck PG_CONFIG="${PG_CONFIG}" PGDATABASE="${PGDATABASE}" || {
   cat "${PGDATA}/postgres.log"
   if [[ -f regression.diffs ]]; then

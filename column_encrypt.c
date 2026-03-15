@@ -235,6 +235,12 @@ suppress_keylog_hook(ErrorData *edata)
 				flag;
 	MemoryContext old_mem_context;
 
+	/* Let earlier hooks mutate ErrorData first so our masking is the last step. */
+	if (prev_emit_log_hook)
+	{
+		prev_emit_log_hook(edata);
+	}
+
 	if (mask_key_log && !(being_hook))
 	{
 		/* Arguments of textregexreplace. */
@@ -399,12 +405,6 @@ suppress_keylog_hook(ErrorData *edata)
 			pfree((void *) flag);
 		/* protect from recursive call */
 		being_hook = false;
-	}
-
-	/* call the old one if exist */
-	if (prev_emit_log_hook)
-	{
-		prev_emit_log_hook(edata);
 	}
 }
 
