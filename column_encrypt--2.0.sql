@@ -19,6 +19,10 @@ DROP OPERATOR IF EXISTS public.= (encrypted_text, encrypted_text);
 DROP FUNCTION IF EXISTS public.regclass(encrypted_text);
 DROP FUNCTION IF EXISTS public.rm_key_details();
 DROP FUNCTION IF EXISTS public.load_key(text);
+DROP FUNCTION IF EXISTS public.load_key_by_version(text, integer);
+DROP FUNCTION IF EXISTS public.activate_cipher_key(integer);
+DROP FUNCTION IF EXISTS public.cipher_key_versions();
+DROP FUNCTION IF EXISTS public.cipher_key_logical_replication_check(text, text);
 DROP FUNCTION IF EXISTS public.pgstat_actv_mask();
 DROP FUNCTION IF EXISTS public.enctext(xml);
 DROP FUNCTION IF EXISTS public.enctext(inet);
@@ -34,6 +38,7 @@ DROP FUNCTION IF EXISTS public.col_enc_comp_eq_text(encrypted_text, encrypted_te
 DROP FUNCTION IF EXISTS public.col_enc_comp_eq_bytea(encrypted_bytea, encrypted_bytea);
 DROP FUNCTION IF EXISTS public.register_cipher_key(text, text);
 DROP FUNCTION IF EXISTS public.register_cipher_key(text, text, text);
+DROP FUNCTION IF EXISTS public.register_cipher_key(text, text, text, integer, boolean);
 DROP FUNCTION IF EXISTS public.cipher_key_reencrypt_data(text, text, text);
 DROP FUNCTION IF EXISTS public.cipher_key_enable_log();
 DROP FUNCTION IF EXISTS public.cipher_key_disable_log();
@@ -340,11 +345,18 @@ AS ASSIGNMENT;
  */
 
 CREATE TABLE cipher_key_table (
-key bytea,
-algorithm text
+    key_version integer PRIMARY KEY CHECK (key_version > 0),
+    wrapped_key bytea NOT NULL,
+    algorithm text NOT NULL,
+    is_active boolean NOT NULL DEFAULT false,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    retired_at timestamptz
 );
 
-CREATE INDEX algo_idx ON cipher_key_table(algorithm);
+CREATE INDEX cipher_key_table_algo_idx ON cipher_key_table(algorithm);
+CREATE UNIQUE INDEX cipher_key_table_single_active_idx
+    ON cipher_key_table ((1))
+    WHERE is_active;
 
 /* Restrict access to cipher_key_table: only superusers can read it */
 REVOKE ALL ON TABLE cipher_key_table FROM PUBLIC;
@@ -354,7 +366,8 @@ ALTER TABLE cipher_key_table ENABLE ROW LEVEL SECURITY;
 CREATE POLICY cipher_key_table_superuser_only ON cipher_key_table
     FOR ALL
     TO PUBLIC
-    USING (pg_catalog.current_setting('is_superuser') = 'on');
+    USING (false)
+    WITH CHECK (false);
 
 
 
@@ -389,7 +402,6 @@ CREATE FUNCTION cipher_key_disable_log() RETURNS boolean
 BEGIN
 
 	SET track_activities = off;
-	SET encrypt.enable = on;
 	RETURN TRUE;
 
 END;
@@ -407,7 +419,6 @@ CREATE FUNCTION cipher_key_enable_log() RETURNS boolean
 BEGIN
 
 	SET track_activities = DEFAULT;
-	SET encrypt.enable = off;
 	RETURN TRUE;
 
 END;
@@ -416,11 +427,11 @@ $$;
 
 
 --
--- Name: register_cipher_key(text, text, text); Type: FUNCTION;
--- Args: cipher_key, cipher_algorithm, master_passphrase (Key Encryption Key)
+-- Name: register_cipher_key(text, text, text, integer, boolean); Type: FUNCTION;
+-- Args: cipher_key, cipher_algorithm, master_passphrase (Key Encryption Key), key_version, make_active
 --
 
-CREATE FUNCTION register_cipher_key(text, text, text) RETURNS integer
+CREATE FUNCTION register_cipher_key(text, text, text, integer, boolean) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO public
     AS $_$
@@ -429,19 +440,12 @@ DECLARE
 	cipher_key  ALIAS FOR $1;
 	cipher_algorithm ALIAS FOR $2;
 	master_passphrase ALIAS FOR $3;
-
-	current_cipher_algorithm TEXT;
-	
-	f_key_num SMALLINT;			/* number of encryption key*/
+    p_key_version ALIAS FOR $4;
+    p_make_active ALIAS FOR $5;
 
 BEGIN
 	/* mask pg_stat_activity's query */
 	PERFORM pgstat_actv_mask();
-
-	/* if cipher_key_disable_log is not yet executed, output an error */
-	IF (SELECT setting FROM pg_settings WHERE name = 'encrypt.enable') != 'on' THEN
-		RAISE EXCEPTION 'EDB-ENC0036 you must call cipher_key_disable_log function first.';
-	END IF;
 
 	IF cipher_key IS NULL OR cipher_key = '' THEN
 		RAISE EXCEPTION 'EDB-ENC0002 new cipher key is invalid';
@@ -456,25 +460,53 @@ BEGIN
 		RAISE EXCEPTION 'EDB-ENC0003 invalid cipher algorithm "%", only "aes" is supported', cipher_algorithm;
 	END IF;
 
-	SET LOCAL search_path TO public;
-	SET LOCAL enable_seqscan TO off;
+    IF p_key_version IS NULL OR p_key_version <= 0 THEN
+        RAISE EXCEPTION 'EDB-ENC0043 key version must be a positive integer';
+    END IF;
 
-	/* obtain lock of enryption key table */
-	LOCK TABLE cipher_key_table IN EXCLUSIVE MODE;
+    LOCK TABLE cipher_key_table IN EXCLUSIVE MODE;
 
-	/* getting the number of encryption key */
-	SELECT count(*) INTO f_key_num FROM cipher_key_table;
-	/* if encryption key is already exist */
-	IF f_key_num = 1 THEN
-			RAISE EXCEPTION 'EDB-ENC0009 a cypher encryption keys are exists in cipher_key_table';
-	END IF;
-	
-	/* encrypt data key with master passphrase (KEK) and register */
-	INSERT INTO cipher_key_table(key, algorithm)
-	VALUES(pgp_sym_encrypt($1, $3, 'cipher-algo=aes256, s2k-mode=3'), $2);
-	RETURN 1;
+    IF EXISTS (
+        SELECT 1
+        FROM cipher_key_table
+        WHERE key_version = p_key_version
+    ) THEN
+        RAISE EXCEPTION 'EDB-ENC0044 key version % is already registered', p_key_version;
+    END IF;
+
+    IF p_make_active THEN
+        UPDATE cipher_key_table
+           SET is_active = false,
+               retired_at = COALESCE(retired_at, now())
+         WHERE is_active;
+    END IF;
+
+	INSERT INTO cipher_key_table(key_version, wrapped_key, algorithm, is_active, retired_at)
+	VALUES(
+        p_key_version,
+        pgp_sym_encrypt(cipher_key, master_passphrase, 'cipher-algo=aes256, s2k-mode=3'),
+        cipher_algorithm,
+        p_make_active,
+        CASE WHEN p_make_active THEN NULL ELSE now() END
+    );
+	RETURN p_key_version;
 END;
 $_$;
+
+CREATE FUNCTION register_cipher_key(text, text, text) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO public
+    AS $$
+BEGIN
+    RETURN register_cipher_key(
+        $1,
+        $2,
+        $3,
+        current_setting('encrypt.key_version')::integer,
+        true
+    );
+END;
+$$;
 
 
 --
@@ -529,48 +561,42 @@ CREATE FUNCTION pgstat_actv_mask() RETURNS void
 --
 
 CREATE FUNCTION load_key(text) RETURNS boolean
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO public
     AS $_$
 
 DECLARE
 	cipher_key ALIAS FOR $1;
-
-	f_algorithm TEXT;		/* encryption algorithm of lastest key */
-	f_key_num INTEGER;		/* number of encryption key */
-	f_result BOOLEAN;
+    f_key_num INTEGER;		/* number of active keys */
 
 BEGIN
 	/* mask pg_stat_activity's query */
 	PERFORM pgstat_actv_mask();
 
-	/* if cipher_key_disable_log is not yet executed, output an error */
-	IF (SELECT setting FROM pg_settings WHERE name = 'encrypt.enable') != 'on' THEN
-		RAISE EXCEPTION 'EDB-ENC0036 you must call cipher_key_disable_log function first.';
-	END IF;
-
-	/* drop encryption key information in memory */
+	/* drop all key information in memory */
 	PERFORM enc_rm_key();
-	/* drop old-encryption key information in memory */
-	PERFORM enc_rm_prv_key();
 
 	IF cipher_key IS NOT NULL THEN
-		/* get number of registered encryption key */
-		SELECT count(*) INTO f_key_num FROM cipher_key_table ;
+		SELECT count(*) INTO f_key_num
+          FROM cipher_key_table
+         WHERE is_active;
 
-		/* return false, if there is no or too many encryption key */
 		IF f_key_num = 0 THEN
 			RETURN FALSE;
-		ELSIF f_key_num>1 THEN
-			RAISE EXCEPTION 'EDB-ENC0009 too many encryption keys are exists in cipher_key_table';
+		ELSIF f_key_num > 1 THEN
+			RAISE EXCEPTION 'EDB-ENC0045 more than one active key exists in cipher_key_table';
 		END IF;
 
 		BEGIN
-			/* load encryption key table to memory */
-			PERFORM enc_store_key(pgp_sym_decrypt(key, cipher_key), algorithm)
-			FROM cipher_key_table;
+			PERFORM set_config('encrypt.key_version', key_version::text, true)
+            FROM cipher_key_table
+            WHERE is_active;
+
+			PERFORM enc_store_key(pgp_sym_decrypt(wrapped_key, cipher_key), algorithm)
+			FROM cipher_key_table
+            WHERE is_active;
 		EXCEPTION
-			WHEN SQLSTATE '39000' THEN
+			WHEN OTHERS THEN
 				PERFORM enc_rm_key();
 				RAISE EXCEPTION 'EDB-ENC0012 cipher key is not correct';
 		END;
@@ -579,6 +605,40 @@ BEGIN
 END;
 $_$;
 
+CREATE FUNCTION load_key_by_version(text, integer) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO public
+    AS $$
+DECLARE
+    master_passphrase ALIAS FOR $1;
+    requested_version ALIAS FOR $2;
+BEGIN
+    IF requested_version IS NULL OR requested_version <= 0 THEN
+        RAISE EXCEPTION 'EDB-ENC0043 key version must be a positive integer';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM cipher_key_table WHERE key_version = requested_version
+    ) THEN
+        RETURN FALSE;
+    END IF;
+
+    PERFORM pgstat_actv_mask();
+    PERFORM set_config('encrypt.key_version', requested_version::text, true);
+
+    BEGIN
+        PERFORM enc_store_key(pgp_sym_decrypt(wrapped_key, master_passphrase), algorithm)
+          FROM cipher_key_table
+         WHERE key_version = requested_version;
+    EXCEPTION
+        WHEN OTHERS THEN
+            RAISE EXCEPTION 'EDB-ENC0012 cipher key is not correct';
+    END;
+
+    RETURN TRUE;
+END;
+$$;
+
 
 
 --
@@ -586,18 +646,56 @@ $_$;
 --
 
 CREATE FUNCTION rm_key_details() RETURNS boolean
-    LANGUAGE plpgsql
+    LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO public
     AS $$
 
 BEGIN
-	/* drop encryption key table in memory */
-	IF (SELECT enc_rm_key()) THEN
-		RETURN TRUE;
-	ELSE
-		RETURN FALSE;
-	END IF;
+	RETURN enc_rm_key();
 END;
+$$;
+
+CREATE FUNCTION activate_cipher_key(integer) RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO public
+    AS $$
+DECLARE
+    requested_version ALIAS FOR $1;
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM cipher_key_table WHERE key_version = requested_version
+    ) THEN
+        RETURN FALSE;
+    END IF;
+
+    UPDATE cipher_key_table
+       SET is_active = (key_version = requested_version),
+           retired_at = CASE
+               WHEN key_version = requested_version THEN NULL
+               WHEN is_active THEN COALESCE(retired_at, now())
+               ELSE retired_at
+           END;
+
+    PERFORM set_config('encrypt.key_version', requested_version::text, false);
+
+    RETURN TRUE;
+END;
+$$;
+
+CREATE FUNCTION cipher_key_versions()
+RETURNS TABLE (
+    key_version integer,
+    algorithm text,
+    is_active boolean,
+    created_at timestamptz,
+    retired_at timestamptz
+)
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO public
+AS $$
+    SELECT c.key_version, c.algorithm, c.is_active, c.created_at, c.retired_at
+      FROM cipher_key_table AS c
+     ORDER BY c.key_version;
 $$;
 
 
@@ -624,11 +722,6 @@ BEGIN
     /* Mask pg_stat_activity */
     PERFORM pgstat_actv_mask();
 
-    /* Require encryption to be enabled */
-    IF (SELECT setting FROM pg_settings WHERE name = 'encrypt.enable') != 'on' THEN
-        RAISE EXCEPTION 'EDB-ENC0036 you must call cipher_key_disable_log first.';
-    END IF;
-
     /* Validate the schema/table/column names to prevent SQL injection */
     IF p_schema !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' OR
        p_table  !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' OR
@@ -636,22 +729,33 @@ BEGIN
         RAISE EXCEPTION 'EDB-ENC0041 invalid schema/table/column name';
     END IF;
 
-    /* Determine the column data type */
-    SELECT data_type INTO v_col_type
-    FROM information_schema.columns
-    WHERE table_schema = p_schema
-      AND table_name   = p_table
-      AND column_name  = p_column;
+    SELECT format_type(a.atttypid, a.atttypmod)
+      INTO v_col_type
+      FROM pg_attribute a
+      JOIN pg_class c
+        ON c.oid = a.attrelid
+      JOIN pg_namespace n
+        ON n.oid = c.relnamespace
+     WHERE n.nspname = p_schema
+       AND c.relname = p_table
+       AND a.attname = p_column
+       AND a.attnum > 0
+       AND NOT a.attisdropped;
 
     IF v_col_type IS NULL THEN
         RAISE EXCEPTION 'EDB-ENC0042 column %.%.% not found',
             p_schema, p_table, p_column;
     END IF;
 
+    IF v_col_type NOT IN ('encrypted_text', 'encrypted_bytea') THEN
+        RAISE EXCEPTION 'EDB-ENC0046 %.%.% is not an encrypted column',
+            p_schema, p_table, p_column;
+    END IF;
+
     /*
      * Build and execute UPDATE that reads each row (triggering decrypt with
-     * previous_key_detail via col_enc_text_out/_bytea_out), then writes it
-     * back (triggering encrypt with current_key_detail via
+     * the ciphertext header version), then writes it
+     * back (triggering encrypt with the currently selected key version via
      * col_enc_text_in/_bytea_in).
      *
      * The cast to text and back forces a decrypt+re-encrypt cycle.
@@ -668,3 +772,83 @@ BEGIN
 END;
 $_$;
 
+CREATE FUNCTION cipher_key_logical_replication_check(text, text)
+RETURNS TABLE (
+    severity text,
+    check_name text,
+    status text,
+    details text
+)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO public
+AS $$
+DECLARE
+    p_schema ALIAS FOR $1;
+    p_table ALIAS FOR $2;
+    encrypted_column_count integer;
+    replica_identity_uses_encrypted boolean;
+BEGIN
+    RETURN QUERY
+    SELECT
+        CASE WHEN current_setting('wal_level') = 'logical' THEN 'info' ELSE 'warning' END,
+        'wal_level',
+        CASE WHEN current_setting('wal_level') = 'logical' THEN 'ok' ELSE 'check' END,
+        format('wal_level is %s', current_setting('wal_level'));
+
+    SELECT count(*)
+      INTO encrypted_column_count
+      FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_type t ON t.oid = a.atttypid
+     WHERE n.nspname = p_schema
+       AND c.relname = p_table
+       AND a.attnum > 0
+       AND NOT a.attisdropped
+       AND t.typname IN ('encrypted_text', 'encrypted_bytea');
+
+    RETURN QUERY
+    SELECT
+        CASE WHEN encrypted_column_count > 0 THEN 'info' ELSE 'warning' END,
+        'encrypted_columns',
+        CASE WHEN encrypted_column_count > 0 THEN 'ok' ELSE 'check' END,
+        format('table %I.%I has %s encrypted columns', p_schema, p_table, encrypted_column_count);
+
+    SELECT EXISTS (
+        SELECT 1
+          FROM pg_index i
+          JOIN pg_class c ON c.oid = i.indrelid
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+          JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+          JOIN pg_type t ON t.oid = a.atttypid
+         WHERE n.nspname = p_schema
+           AND c.relname = p_table
+           AND i.indisreplident
+           AND t.typname IN ('encrypted_text', 'encrypted_bytea')
+    ) INTO replica_identity_uses_encrypted;
+
+    RETURN QUERY
+    SELECT
+        CASE WHEN replica_identity_uses_encrypted THEN 'warning' ELSE 'info' END,
+        'replica_identity',
+        CASE WHEN replica_identity_uses_encrypted THEN 'check' ELSE 'ok' END,
+        CASE
+            WHEN replica_identity_uses_encrypted THEN 'replica identity includes encrypted columns; confirm subscriber semantics and key availability'
+            ELSE 'replica identity does not include encrypted columns'
+        END;
+
+    RETURN QUERY
+    SELECT
+        'warning',
+        'subscriber_prereqs',
+        'manual',
+        'logical subscribers must have the column_encrypt extension installed and must load the correct keys independently; keys are not replicated';
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION enc_store_key(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION enc_store_prv_key(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION enc_rm_key() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION enc_rm_prv_key() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION pgstat_actv_mask() FROM PUBLIC;

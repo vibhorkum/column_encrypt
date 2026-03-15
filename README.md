@@ -33,11 +33,13 @@
 - **Two-tier key model**: Key Encryption Key (KEK) wraps the Data Encryption Key (DEK), so the DEK is never stored in plaintext
 - **AES encryption** via the `pgcrypto` extension
 - **Key version header** embedded in every ciphertext for future key rotation tracking
+- **Version-aware decryption** using the ciphertext header and session-loaded keys
 - **Log masking** — an `emit_log_hook` prevents key material from appearing in PostgreSQL logs or `pg_stat_activity`
-- **Row-Level Security** on `cipher_key_table` restricts direct access to the stored (wrapped) DEK
+- **Key registry metadata** with active/inactive versions and activation controls
 - **Key rotation** support with a built-in re-encryption helper function
-- **Hash index support** on encrypted columns (`=` operator for `encrypted_text` and `encrypted_bytea`)
+- **Hash/equality semantics on decrypted plaintext** so comparisons remain correct across key rotation
 - **Cast support** from `bool`, `inet`, `cidr`, `xml`, and `character` to `encrypted_text`
+- **Logical replication readiness check** for encrypted tables
 
 ---
 
@@ -54,10 +56,11 @@
 The extension registers two custom base types (`encrypted_text`, `encrypted_bytea`) backed by variable-length `bytea` storage.
 
 - **On `INSERT`/`UPDATE`**: the type input function (`col_enc_text_in` / `col_enc_bytea_in`) transparently encrypts the supplied plaintext value using the session's currently loaded DEK.
-- **On `SELECT`**: the type output function (`col_enc_text_out` / `col_enc_bytea_out`) transparently decrypts the stored ciphertext using the session's currently loaded DEK.
-- A **2-byte key version header** is prepended to every ciphertext, enabling the extension to identify which key version was used to encrypt each value and supporting future key rotation.
-- Keys are held in **`TopMemoryContext`** and securely zeroed with `secure_memset` when removed from session memory.
+- **On `SELECT`**: the type output function (`col_enc_text_out` / `col_enc_bytea_out`) transparently decrypts the stored ciphertext using the matching session-loaded key for that ciphertext version.
+- A **2-byte key version header** is prepended to every ciphertext and used during decryption and re-encryption workflows.
+- Keys are held in **`TopMemoryContext`** as a versioned in-memory keyring and are securely zeroed with `secure_memset` when removed from session memory.
 - An **`emit_log_hook`** masks `(...)` patterns in log messages (query text, detail, context, internal query) to prevent key material from leaking into `pg_log` or `pg_stat_activity`.
+- Binary protocol `SEND` / `RECEIVE` is intentionally rejected so clients cannot bypass the text I/O encryption path.
 
 ---
 
@@ -186,14 +189,18 @@ This is also expected — an incorrect passphrase is rejected.
 | Function | Returns | Description |
 |---|---|---|
 | `register_cipher_key(data_key text, algorithm text, master_passphrase text)` | `integer` | Wraps the DEK with the KEK (master passphrase) using AES-256/S2K and stores it in `cipher_key_table`. |
-| `load_key(master_passphrase text)` | `boolean` | Decrypts the DEK from `cipher_key_table` using the master passphrase and loads it into session memory. |
-| `cipher_key_disable_log()` | `boolean` | Disables `track_activities` and enables `encrypt.enable` before sensitive key operations. |
-| `cipher_key_enable_log()` | `boolean` | Re-enables `track_activities` and disables `encrypt.enable` after sensitive key operations. |
+| `load_key(master_passphrase text)` | `boolean` | Decrypts the active DEK from `cipher_key_table` using the master passphrase and loads it into session memory. |
+| `load_key_by_version(master_passphrase text, key_version integer)` | `boolean` | Loads a specific stored key version into the session keyring. |
+| `cipher_key_disable_log()` | `boolean` | Disables `track_activities` before sensitive key operations. |
+| `cipher_key_enable_log()` | `boolean` | Re-enables `track_activities` after sensitive key operations. |
 | `enc_store_key(key text, algorithm text)` | `boolean` | Directly stores the current DEK in session memory (used during key rotation). |
 | `enc_store_prv_key(key text, algorithm text)` | `boolean` | Stores the previous DEK in session memory (used during key rotation). |
-| `enc_rm_key()` | `boolean` | Securely removes the current DEK from session memory (zeroes the key bytes). |
-| `enc_rm_prv_key()` | `boolean` | Securely removes the previous DEK from session memory (zeroes the key bytes). |
+| `enc_rm_key()` | `boolean` | Securely removes all loaded DEKs from session memory (zeroes the key bytes). |
+| `enc_rm_prv_key()` | `boolean` | Compatibility alias for clearing the loaded keyring. |
 | `cipher_key_reencrypt_data(schema text, table text, column text)` | `bigint` | Re-encrypts all values in the specified encrypted column using the new key (reads with previous key, writes with current key). Returns the number of rows re-encrypted. |
+| `activate_cipher_key(key_version integer)` | `boolean` | Marks one registered key version as active and retires the previously active version. |
+| `cipher_key_versions()` | `setof record` | Lists registered key versions and their metadata. |
+| `cipher_key_logical_replication_check(schema text, table text)` | `setof record` | Returns local readiness checks and warnings for logical replication of encrypted tables. |
 
 ---
 
@@ -203,7 +210,7 @@ All parameters require **superuser** (`PGC_SUSET`) to change.
 
 | Parameter | Type | Default | Range | Description |
 |---|---|---|---|---|
-| `encrypt.enable` | `bool` | `on` | — | Enables or disables column encryption globally. When `off`, raw ciphertext is stored and returned without encryption/decryption. |
+| `encrypt.enable` | `bool` | `on` | — | Enables or disables column encryption globally. This is independent from the log masking helper functions. |
 | `encrypt.mask_key_log` | `bool` | `on` | — | When enabled, masks `(...)` patterns in PostgreSQL log messages (query, detail, context, internal query) to prevent key material from leaking into logs. |
 | `encrypt.key_version` | `int` | `1` | `1–32767` | Key version number written into the 2-byte ciphertext header. Increment this when rotating keys to track which version encrypted each value. |
 
@@ -211,9 +218,10 @@ All parameters require **superuser** (`PGC_SUSET`) to change.
 
 ## Security Model
 
-- **`cipher_key_table`** has `REVOKE ALL FROM PUBLIC` and Row-Level Security (RLS) enabled. Only superusers can query it directly.
-- All key operations (`register_cipher_key`, `cipher_key_reencrypt_data`, `cipher_key_disable_log`, `cipher_key_enable_log`) use **`SECURITY DEFINER`** to execute with elevated privileges.
+- **`cipher_key_table`** stores versioned wrapped keys, activation metadata, and timestamps. Direct table access is revoked from `PUBLIC`.
+- Administrative key operations (`register_cipher_key`, `activate_cipher_key`, `cipher_key_reencrypt_data`, `cipher_key_disable_log`, `cipher_key_enable_log`) use **`SECURITY DEFINER`** to execute with elevated privileges.
 - **`encrypt.enable`** is `PGC_SUSET` — only superusers can enable or disable encryption. This prevents unprivileged users from bypassing encryption by toggling the GUC.
+- Low-level helper functions such as `enc_store_key`, `enc_store_prv_key`, and `pgstat_actv_mask` are revoked from `PUBLIC`.
 - Encryption keys stored in C session memory are **zeroed with `secure_memset`** when removed, preventing key material from lingering in process memory.
 - The **`emit_log_hook`** masks `(...)` patterns in all of the following log fields to prevent keys from leaking: query text, detail message, context message, and internal query message.
 
@@ -233,31 +241,44 @@ All parameters require **superuser** (`PGC_SUSET`) to change.
 To rotate the encryption key, follow these steps in a single superuser session:
 
 ```sql
--- Step 1: Disable logging and load both old and new keys into session memory
+-- Step 1: Disable logging and register the next key version as inactive
 SELECT cipher_key_disable_log();
+SELECT register_cipher_key('new-data-key', 'aes', 'my-master-passphrase', 2, false);
 
--- Store the current (old) DEK as the previous key (used for decryption during re-encrypt)
-SELECT enc_store_prv_key('old-data-key', 'aes');
+-- Step 2: Load both versions into the session keyring
+SELECT load_key_by_version('my-master-passphrase', 1);
+SELECT load_key_by_version('my-master-passphrase', 2);
+SET encrypt.key_version = 2;
 
--- Store the new DEK as the current key (used for encryption during re-encrypt)
-SELECT enc_store_key('new-data-key', 'aes');
-
--- Step 2: Re-encrypt all data in the encrypted column
--- (reads each value with enc_store_prv_key, writes it back with enc_store_key)
+-- Step 3: Re-encrypt all data in the encrypted column
 SELECT cipher_key_reencrypt_data('public', 'secure_data', 'ssn');
 
--- Step 3: Replace the stored wrapped key with the new DEK wrapped by the new master passphrase
-DELETE FROM cipher_key_table;
-SELECT register_cipher_key('new-data-key', 'aes', 'new-master-passphrase');
+-- Step 4: Activate the new version
+SELECT activate_cipher_key(2);
 
--- Step 4: Clear both keys from session memory
-SELECT enc_rm_prv_key();
+-- Step 5: Clear the session keyring
 SELECT enc_rm_key();
-
 SELECT cipher_key_enable_log();
 ```
 
-After rotation, all new sessions must call `load_key('new-master-passphrase')` to use the new key.
+After rotation, all new sessions must call `load_key('my-master-passphrase')` to use the active key version.
+
+## Logical Replication
+
+`column_encrypt` replicates ciphertext, not plaintext. That means:
+
+- subscribers must have the extension installed
+- subscribers must manage and load keys independently
+- wrapped keys in `cipher_key_table` are not replicated as usable session keys
+
+Use the built-in readiness helper before publishing encrypted tables:
+
+```sql
+SELECT *
+FROM cipher_key_logical_replication_check('public', 'secure_data');
+```
+
+This highlights local issues such as `wal_level`, encrypted columns, and replica identity usage.
 
 ---
 
@@ -278,4 +299,3 @@ Currently validated algorithm:
 ## License
 
 This extension is licensed under the [PostgreSQL License](LICENSE), a permissive open-source license similar to the BSD 2-Clause license.
-
