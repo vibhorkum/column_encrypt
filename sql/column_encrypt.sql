@@ -3,6 +3,11 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS column_encrypt;
 
+DROP ROLE IF EXISTS regress_admin;
+DROP ROLE IF EXISTS regress_runtime;
+DROP ROLE IF EXISTS regress_reader;
+DROP ROLE IF EXISTS regress_app;
+
 CREATE ROLE regress_admin LOGIN;
 CREATE ROLE regress_runtime LOGIN;
 CREATE ROLE regress_reader LOGIN;
