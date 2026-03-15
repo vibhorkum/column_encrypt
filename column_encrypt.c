@@ -733,16 +733,17 @@ Datum
 enc_hash_encrted_data(PG_FUNCTION_ARGS)
 {
 	bytea	   *cipher = PG_GETARG_BYTEA_PP(0);
-	bytea	   *plain = NULL;
-
 	Datum		result;
 
-	plain = decrypt_ciphertext(cipher);
-	result = hash_any((unsigned char *) VARDATA_ANY(plain),
-					  VARSIZE_ANY_EXHDR(plain));
+	/*
+	 * Compute a hash directly over the ciphertext bytes. This keeps the
+	 * function truly immutable and independent of session keyring state,
+	 * which is required for its use in hash operator classes.
+	 */
+	result = hash_any((unsigned char *) VARDATA_ANY(cipher),
+					  VARSIZE_ANY_EXHDR(cipher));
 
 	/* avoiding leaking memory for toasted input */
-	pfree(plain);
 	PG_FREE_IF_COPY(cipher, 0);
 
 	return result;
