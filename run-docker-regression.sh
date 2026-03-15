@@ -16,4 +16,5 @@ esac
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "${SCRIPT_DIR}"
+PG_MAJOR="${PG_MAJOR}" docker compose -f docker/docker-compose.test.yml build regression
 PG_MAJOR="${PG_MAJOR}" docker compose -f docker/docker-compose.test.yml run --rm regression

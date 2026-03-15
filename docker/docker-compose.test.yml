@@ -1,5 +1,6 @@
 services:
   regression:
+    image: column-encrypt-regression:${PG_MAJOR:-18}
     build:
       context: ..
       dockerfile: docker/Dockerfile

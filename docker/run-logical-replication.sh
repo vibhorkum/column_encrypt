@@ -25,6 +25,7 @@ init_service() {
     set -euo pipefail
     export PATH='${PG_BINDIR}':\$PATH
     cd '${REPO_DIR}'
+    make clean PG_CONFIG='${PG_BINDIR}/pg_config'
     make PG_CONFIG='${PG_BINDIR}/pg_config'
     make install PG_CONFIG='${PG_BINDIR}/pg_config'
     rm -rf /tmp/${service}-pgdata

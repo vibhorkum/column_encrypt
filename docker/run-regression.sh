@@ -37,6 +37,7 @@ rm -rf "${PGDATA}"
 mkdir -p "${PGDATA}"
 chown -R postgres:postgres "${PGDATA}"
 
+make clean PG_CONFIG="${PG_CONFIG}"
 make PG_CONFIG="${PG_CONFIG}"
 make install PG_CONFIG="${PG_CONFIG}"
 

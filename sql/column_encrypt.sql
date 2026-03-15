@@ -3,10 +3,22 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS column_encrypt;
 
-DROP ROLE IF EXISTS regress_admin;
-DROP ROLE IF EXISTS regress_runtime;
-DROP ROLE IF EXISTS regress_reader;
-DROP ROLE IF EXISTS regress_app;
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'regress_admin') THEN
+        EXECUTE 'DROP ROLE regress_admin';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'regress_runtime') THEN
+        EXECUTE 'DROP ROLE regress_runtime';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'regress_reader') THEN
+        EXECUTE 'DROP ROLE regress_reader';
+    END IF;
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'regress_app') THEN
+        EXECUTE 'DROP ROLE regress_app';
+    END IF;
+END;
+$$;
 
 CREATE ROLE regress_admin LOGIN;
 CREATE ROLE regress_runtime LOGIN;

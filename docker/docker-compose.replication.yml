@@ -1,5 +1,6 @@
 services:
   publisher:
+    image: column-encrypt-publisher:${PG_MAJOR:-18}
     build:
       context: ..
       dockerfile: docker/Dockerfile
@@ -14,6 +15,7 @@ services:
       - ..:/workspace
 
   subscriber:
+    image: column-encrypt-subscriber:${PG_MAJOR:-18}
     build:
       context: ..
       dockerfile: docker/Dockerfile
