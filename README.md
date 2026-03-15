@@ -358,9 +358,9 @@ The blind-index key should be managed separately from the DEK/KEK used for encry
 
 ---
 
-## Logical Replication
+## Logical Replication: Docker Harness
 
-Logical replication of encrypted columns works when replication transports ciphertext rather than plaintext. The branch includes a Docker harness that validates this model end to end.
+See [Logical Replication](#logical-replication) above for the conceptual model; this section documents the Docker-based integration harness that validates it end to end.
 
 Recommended pattern:
 
