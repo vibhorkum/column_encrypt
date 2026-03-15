@@ -54,6 +54,18 @@ SELECT has_function_privilege('regress_app', 'load_key(text)', 'EXECUTE');
  f
 (1 row)
 
+SELECT has_function_privilege('regress_runtime', 'loaded_cipher_key_versions()', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ t
+(1 row)
+
+SELECT has_function_privilege('regress_app', 'rm_key_details()', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ f
+(1 row)
+
 SET ROLE regress_admin;
 SELECT cipher_key_disable_log();
  cipher_key_disable_log 
@@ -79,6 +91,12 @@ SELECT load_key('my-master-passphrase');
  load_key 
 ----------
  t
+(1 row)
+
+SELECT loaded_cipher_key_versions();
+ loaded_cipher_key_versions 
+----------------------------
+ {1}
 (1 row)
 
 RESET ROLE;
@@ -109,6 +127,34 @@ BEGIN
 END;
 $$;
 NOTICE:  load_key denied for regress_app
+RESET ROLE;
+SET ROLE regress_runtime;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM revoke_cipher_key(1);
+        RAISE EXCEPTION 'revoke_cipher_key unexpectedly succeeded';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'revoke_cipher_key denied for regress_runtime';
+    END;
+END;
+$$;
+NOTICE:  revoke_cipher_key denied for regress_runtime
+RESET ROLE;
+SET ROLE regress_app;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM rm_key_details();
+        RAISE EXCEPTION 'rm_key_details unexpectedly succeeded';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'rm_key_details denied for regress_app';
+    END;
+END;
+$$;
+NOTICE:  rm_key_details denied for regress_app
 RESET ROLE;
 CREATE TABLE test_enc_text (id serial, ssn encrypted_text);
 INSERT INTO test_enc_text(ssn) VALUES ('123-45-6789');
@@ -148,6 +194,16 @@ SELECT column_encrypt_blind_index_bytea('hello'::bytea, 'blind-index-secret');
  639c2b12e8e37cef74791ea0f114e2fb3097513dfddbfaa365a72ba1145a6c8d
 (1 row)
 
+SELECT loaded_cipher_key_versions();
+ loaded_cipher_key_versions 
+----------------------------
+ {1}
+(1 row)
+
+SELECT col_enc_send_text('123-45-6789'::encrypted_text);
+ERROR:  binary protocol is not supported for encrypted types
+SELECT col_enc_send_bytea('hello'::encrypted_bytea);
+ERROR:  binary protocol is not supported for encrypted types
 SET ROLE regress_admin;
 SELECT cipher_key_disable_log();
  cipher_key_disable_log 
@@ -198,6 +254,12 @@ SHOW encrypt.key_version;
  encrypt.key_version 
 ---------------------
  1
+(1 row)
+
+SELECT loaded_cipher_key_versions();
+ loaded_cipher_key_versions 
+----------------------------
+ {2,1}
 (1 row)
 
 SET encrypt.key_version = 2;
@@ -304,6 +366,48 @@ SELECT key_version, algorithm, key_state FROM cipher_key_versions() ORDER BY key
            3 | aes       | active
 (3 rows)
 
+SET ROLE regress_admin;
+SELECT cipher_key_disable_log();
+ cipher_key_disable_log 
+------------------------
+ t
+(1 row)
+
+SELECT register_cipher_key('my-data-encryption-key-v4', 'aes', 'my-master-passphrase', 4, false);
+ register_cipher_key 
+---------------------
+                   4
+(1 row)
+
+SELECT revoke_cipher_key(4);
+ revoke_cipher_key 
+-------------------
+ t
+(1 row)
+
+SELECT cipher_key_enable_log();
+ cipher_key_enable_log 
+-----------------------
+ t
+(1 row)
+
+RESET ROLE;
+SET ROLE regress_runtime;
+SELECT load_key_by_version('my-master-passphrase', 4);
+ load_key_by_version 
+---------------------
+ f
+(1 row)
+
+RESET ROLE;
+SET ROLE regress_admin;
+SELECT activate_cipher_key(4);
+ activate_cipher_key 
+---------------------
+ f
+(1 row)
+
+RESET ROLE;
 SELECT COUNT(*) FROM cipher_key_logical_replication_check('public', 'test_enc_text');
  count 
 -------

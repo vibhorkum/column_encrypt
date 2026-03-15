@@ -41,6 +41,7 @@
 - **Key rotation** support with both full-table and batched re-encryption helpers
 - **Optional blind-index helpers** for scalable equality lookup patterns
 - **Hash/equality semantics on decrypted plaintext** so comparisons remain correct across key rotation
+- **Session introspection helper** to show which key versions are currently loaded in the backend
 - **Cast support** from `bool`, `inet`, `cidr`, `xml`, and `character` to `encrypted_text`
 - **Logical replication readiness check** for encrypted tables
 
@@ -65,6 +66,8 @@ The extension registers two custom base types (`encrypted_text`, `encrypted_byte
 - An **`emit_log_hook`** masks known sensitive key-management function calls in log messages (query text, detail, context, internal query) to reduce accidental key leakage.
 - Administrative and runtime functions are gated by dedicated extension roles instead of `PUBLIC` execution.
 - Binary protocol `SEND` / `RECEIVE` is intentionally rejected so clients cannot bypass the text I/O encryption path.
+- Equality and hash behavior are defined on **decrypted plaintext**, not raw ciphertext bytes.
+- Range ordering on encrypted values is intentionally **unsupported**; use companion blind indexes for scalable equality lookups instead.
 
 ---
 
@@ -232,6 +235,7 @@ This is also expected — an incorrect passphrase is rejected.
 | `register_cipher_key(data_key text, algorithm text, master_passphrase text)` | `integer` | Wraps the DEK with the KEK (master passphrase) using AES-256/S2K and stores it in `cipher_key_table`. |
 | `load_key(master_passphrase text)` | `boolean` | Decrypts the active DEK from `cipher_key_table` using the master passphrase and loads it into session memory. |
 | `load_key_by_version(master_passphrase text, key_version integer)` | `boolean` | Loads a specific stored key version into the session keyring. |
+| `loaded_cipher_key_versions()` | `integer[]` | Returns the key versions currently loaded into the backend session keyring, without exposing key material. |
 | `cipher_key_disable_log()` | `boolean` | Disables `track_activities` before sensitive key operations. |
 | `cipher_key_enable_log()` | `boolean` | Re-enables `track_activities` after sensitive key operations. |
 | `enc_store_key(key text, algorithm text)` | `boolean` | Directly stores the current DEK in session memory (used during key rotation). |
@@ -272,6 +276,7 @@ All parameters require **superuser** (`PGC_SUSET`) to change.
 - Low-level helper functions such as `enc_store_key`, `enc_store_prv_key`, and `pgstat_actv_mask` are revoked from `PUBLIC`.
 - Encryption keys stored in C session memory are **zeroed with `secure_memset`** when removed, preventing key material from lingering in process memory.
 - The **`emit_log_hook`** only targets known sensitive key-management function calls. It is a defense-in-depth measure, not a substitute for cautious operational handling of passphrases.
+- `loaded_cipher_key_versions()` is safe to grant to runtime roles because it reveals version metadata only, not DEKs or passphrases.
 
 Example grants:
 
@@ -329,6 +334,7 @@ After rotation, all new sessions must call `load_key('my-master-passphrase')` to
 - subscribers must have the extension installed
 - subscribers must manage and load keys independently
 - wrapped keys in `cipher_key_table` are not replicated as usable session keys
+- replication/apply roles should run with `encrypt.enable = off` so replication transports ciphertext rather than decrypted plaintext
 
 Use the built-in readiness helper before publishing encrypted tables:
 
@@ -344,6 +350,7 @@ For local end-to-end testing, the branch also includes a Docker-based logical re
 ## Blind Indexing
 
 For scalable equality lookups, prefer a companion blind-index column over direct comparisons on encrypted columns.
+Do not rely on `<`, `<=`, `>`, or `>=` semantics for encrypted values; plaintext range ordering is intentionally unsupported.
 
 Example:
 

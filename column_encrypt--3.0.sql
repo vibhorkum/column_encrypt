@@ -34,6 +34,7 @@ DROP FUNCTION IF EXISTS public.enctext(character);
 DROP FUNCTION IF EXISTS public.enctext(boolean);
 DROP FUNCTION IF EXISTS public.enc_key_version(encrypted_text);
 DROP FUNCTION IF EXISTS public.enc_key_version(encrypted_bytea);
+DROP FUNCTION IF EXISTS public.loaded_cipher_key_versions();
 DROP FUNCTION IF EXISTS public.enc_store_prv_key(text, text);
 DROP FUNCTION IF EXISTS public.enc_store_key(text, text);
 DROP FUNCTION IF EXISTS public.enc_hash_enctext(encrypted_text);
@@ -227,6 +228,10 @@ AS 'column_encrypt', 'enc_key_version_text';
 CREATE FUNCTION enc_key_version(encrypted_bytea) RETURNS integer
 LANGUAGE c IMMUTABLE STRICT
 AS 'column_encrypt', 'enc_key_version_bytea';
+
+CREATE FUNCTION loaded_cipher_key_versions() RETURNS integer[]
+LANGUAGE c STABLE
+AS 'column_encrypt', 'enc_loaded_key_versions';
 
 
 /*
@@ -1054,6 +1059,7 @@ REVOKE EXECUTE ON FUNCTION column_encrypt_blind_index_text(text, text) FROM PUBL
 REVOKE EXECUTE ON FUNCTION column_encrypt_blind_index_bytea(bytea, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION enc_key_version(encrypted_text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION enc_key_version(encrypted_bytea) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION loaded_cipher_key_versions() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION enc_store_key(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION enc_store_prv_key(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION enc_rm_key() FROM PUBLIC;
@@ -1078,6 +1084,7 @@ GRANT EXECUTE ON FUNCTION column_encrypt_blind_index_text(text, text) TO column_
 GRANT EXECUTE ON FUNCTION column_encrypt_blind_index_bytea(bytea, text) TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION enc_key_version(encrypted_text) TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION enc_key_version(encrypted_bytea) TO column_encrypt_admin;
+GRANT EXECUTE ON FUNCTION loaded_cipher_key_versions() TO column_encrypt_admin;
 
 GRANT EXECUTE ON FUNCTION load_key(text) TO column_encrypt_runtime;
 GRANT EXECUTE ON FUNCTION load_key_by_version(text, integer) TO column_encrypt_runtime;
@@ -1087,6 +1094,7 @@ GRANT EXECUTE ON FUNCTION column_encrypt_blind_index_text(text, text) TO column_
 GRANT EXECUTE ON FUNCTION column_encrypt_blind_index_bytea(bytea, text) TO column_encrypt_runtime;
 GRANT EXECUTE ON FUNCTION enc_key_version(encrypted_text) TO column_encrypt_runtime;
 GRANT EXECUTE ON FUNCTION enc_key_version(encrypted_bytea) TO column_encrypt_runtime;
+GRANT EXECUTE ON FUNCTION loaded_cipher_key_versions() TO column_encrypt_runtime;
 
 GRANT EXECUTE ON FUNCTION cipher_key_versions() TO column_encrypt_reader;
 GRANT EXECUTE ON FUNCTION cipher_key_logical_replication_check(text, text) TO column_encrypt_reader;

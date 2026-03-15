@@ -14,6 +14,7 @@
 #include "libpq/pqformat.h"
 #include "utils/memutils.h"
 #include "catalog/pg_collation.h"
+#include "utils/array.h"
 
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
@@ -108,6 +109,7 @@ PG_FUNCTION_INFO_V1(enc_text_regclass);
 PG_FUNCTION_INFO_V1(enc_hash_encrted_data);
 PG_FUNCTION_INFO_V1(enc_key_version_text);
 PG_FUNCTION_INFO_V1(enc_key_version_bytea);
+PG_FUNCTION_INFO_V1(enc_loaded_key_versions);
 PG_FUNCTION_INFO_V1(enc_store_key);
 PG_FUNCTION_INFO_V1(enc_store_prv_key);
 PG_FUNCTION_INFO_V1(enc_rm_key);
@@ -766,6 +768,38 @@ enc_key_version_bytea(PG_FUNCTION_ARGS)
 
 	PG_FREE_IF_COPY(cipher, 0);
 	PG_RETURN_INT32(key_version);
+}
+
+Datum
+enc_loaded_key_versions(PG_FUNCTION_ARGS)
+{
+	key_detail  *entry = loaded_keys;
+	Datum	   *values;
+	int			count = 0;
+	int			i = 0;
+	ArrayType  *result;
+
+	while (entry != NULL)
+	{
+		count++;
+		entry = entry->next;
+	}
+
+	if (count == 0)
+		PG_RETURN_ARRAYTYPE_P(construct_empty_array(INT4OID));
+
+	values = (Datum *) palloc(sizeof(Datum) * count);
+	entry = loaded_keys;
+	while (entry != NULL)
+	{
+		values[i++] = Int32GetDatum(entry->version);
+		entry = entry->next;
+	}
+
+	result = construct_array(values, count, INT4OID, sizeof(int32), true, TYPALIGN_INT);
+	pfree(values);
+
+	PG_RETURN_ARRAYTYPE_P(result);
 }
 
 
