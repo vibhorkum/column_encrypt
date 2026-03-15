@@ -361,41 +361,13 @@ AS ASSIGNMENT;
 CREATE TABLE cipher_key_table (
     key_version integer PRIMARY KEY CHECK (key_version > 0),
     wrapped_key bytea NOT NULL,
-    algorithm text NOT NULL,
-    key_state text NOT NULL DEFAULT 'pending'
-        CHECK (key_state IN ('pending', 'active', 'retired', 'revoked')),
-    created_at timestamptz NOT NULL DEFAULT now(),
-    state_changed_at timestamptz NOT NULL DEFAULT now()
+    algorithm text NOT NULL
 );
 
 CREATE INDEX cipher_key_table_algo_idx ON cipher_key_table(algorithm);
-CREATE UNIQUE INDEX cipher_key_table_single_active_idx
-    ON cipher_key_table ((1))
-    WHERE key_state = 'active';
 
-/* Restrict access to cipher_key_table: only superusers can read it */
+/* Restrict access to cipher_key_table */
 REVOKE ALL ON TABLE cipher_key_table FROM PUBLIC;
-ALTER TABLE cipher_key_table ENABLE ROW LEVEL SECURITY;
-
-/* Only superusers (who bypass RLS) can query this table directly */
-CREATE POLICY cipher_key_table_superuser_only ON cipher_key_table
-    FOR ALL
-    TO PUBLIC
-    USING (false)
-    WITH CHECK (false);
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'column_encrypt_admin') THEN
-        EXECUTE 'CREATE ROLE column_encrypt_admin NOLOGIN';
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'column_encrypt_runtime') THEN
-        EXECUTE 'CREATE ROLE column_encrypt_runtime NOLOGIN';
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'column_encrypt_reader') THEN
-        EXECUTE 'CREATE ROLE column_encrypt_reader NOLOGIN';
-    END IF;
-END;
 $$;
 
 
