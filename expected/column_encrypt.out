@@ -366,6 +366,20 @@ SELECT load_key_by_version('my-master-passphrase', 3);
 (1 row)
 
 RESET ROLE;
+SET encrypt.enable = off;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM cipher_key_reencrypt_data_batch('public', 'test_batch_rotate', 'val', 15);
+        RAISE EXCEPTION 'cipher_key_reencrypt_data_batch unexpectedly succeeded with encrypt.enable=off';
+    EXCEPTION
+        WHEN OTHERS THEN
+            RAISE NOTICE 'cipher_key_reencrypt_data_batch blocked when encrypt.enable is off';
+    END;
+END;
+$$;
+NOTICE:  cipher_key_reencrypt_data_batch blocked when encrypt.enable is off
+SET encrypt.enable = on;
 SET encrypt.key_version = 3;
 DO $$
 DECLARE

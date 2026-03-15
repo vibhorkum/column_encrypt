@@ -6,60 +6,6 @@
 
 SET check_function_bodies TO off;
 
---
--- Ensure we are loading recent functions
---
-DROP TABLE IF EXISTS public.cipher_key_table;
-DROP OPERATOR CLASS IF EXISTS public.hash_text_enc_ops USING hash;
-DROP OPERATOR FAMILY IF EXISTS public.hash_text_enc_ops USING hash;
-DROP OPERATOR CLASS IF EXISTS public.hash_bytea_enc_ops USING hash;
-DROP OPERATOR FAMILY IF EXISTS public.hash_bytea_enc_ops USING hash;
-DROP OPERATOR IF EXISTS public.= (encrypted_bytea, encrypted_bytea);
-DROP OPERATOR IF EXISTS public.= (encrypted_text, encrypted_text);
-DROP FUNCTION IF EXISTS public.regclass(encrypted_text);
-DROP FUNCTION IF EXISTS public.rm_key_details();
-DROP FUNCTION IF EXISTS public.load_key(text);
-DROP FUNCTION IF EXISTS public.load_key_by_version(text, integer);
-DROP FUNCTION IF EXISTS public.column_encrypt_blind_index_text(text, text);
-DROP FUNCTION IF EXISTS public.column_encrypt_blind_index_bytea(bytea, text);
-DROP FUNCTION IF EXISTS public.activate_cipher_key(integer);
-DROP FUNCTION IF EXISTS public.revoke_cipher_key(integer);
-DROP FUNCTION IF EXISTS public.cipher_key_versions();
-DROP FUNCTION IF EXISTS public.cipher_key_logical_replication_check(text, text);
-DROP FUNCTION IF EXISTS public.cipher_key_reencrypt_data_batch(text, text, text, integer);
-DROP FUNCTION IF EXISTS public.pgstat_actv_mask();
-DROP FUNCTION IF EXISTS public.enctext(xml);
-DROP FUNCTION IF EXISTS public.enctext(inet);
-DROP FUNCTION IF EXISTS public.enctext(character);
-DROP FUNCTION IF EXISTS public.enctext(boolean);
-DROP FUNCTION IF EXISTS public.enc_key_version(encrypted_text);
-DROP FUNCTION IF EXISTS public.enc_key_version(encrypted_bytea);
-DROP FUNCTION IF EXISTS public.loaded_cipher_key_versions();
-DROP FUNCTION IF EXISTS public.enc_store_prv_key(text, text);
-DROP FUNCTION IF EXISTS public.enc_store_key(text, text);
-DROP FUNCTION IF EXISTS public.enc_hash_enctext(encrypted_text);
-DROP FUNCTION IF EXISTS public.enc_hash_encbytea(encrypted_bytea);
-DROP FUNCTION IF EXISTS public.enc_rm_prv_key();
-DROP FUNCTION IF EXISTS public.enc_rm_key();
-DROP FUNCTION IF EXISTS public.col_enc_comp_eq_text(encrypted_text, encrypted_text);
-DROP FUNCTION IF EXISTS public.col_enc_comp_eq_bytea(encrypted_bytea, encrypted_bytea);
-DROP FUNCTION IF EXISTS public.register_cipher_key(text, text);
-DROP FUNCTION IF EXISTS public.register_cipher_key(text, text, text);
-DROP FUNCTION IF EXISTS public.register_cipher_key(text, text, text, integer, boolean);
-DROP FUNCTION IF EXISTS public.cipher_key_reencrypt_data(text, text, text);
-DROP FUNCTION IF EXISTS public.cipher_key_enable_log();
-DROP FUNCTION IF EXISTS public.cipher_key_disable_log();
-DROP TYPE IF EXISTS public.encrypted_text CASCADE;
-DROP FUNCTION IF EXISTS public.col_enc_send(encrypted_text);
-DROP FUNCTION IF EXISTS public.col_enc_recv(internal);
-DROP FUNCTION IF EXISTS public.col_enc_text_out(encrypted_text);
-DROP FUNCTION IF EXISTS public.col_enc_text_in(cstring);
-DROP TYPE IF EXISTS public.encrypted_bytea CASCADE;
-DROP FUNCTION IF EXISTS public.col_enc_send(encrypted_bytea);
-DROP FUNCTION IF EXISTS public.col_enc_recv(internal);
-DROP FUNCTION IF EXISTS public.col_enc_bytea_out(encrypted_bytea);
-DROP FUNCTION IF EXISTS public.col_enc_bytea_in(cstring);
-
 /*
  * Create encrypted types
  */
@@ -841,6 +787,10 @@ BEGIN
     /* Mask pg_stat_activity */
     PERFORM pgstat_actv_mask();
 
+    IF current_setting('encrypt.enable') <> 'on' THEN
+        RAISE EXCEPTION 'EDB-ENC0048 encrypt.enable must be on for data re-encryption';
+    END IF;
+
     /* Validate the schema/table/column names to prevent SQL injection */
     IF p_schema !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' OR
        p_table  !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' OR
@@ -906,6 +856,10 @@ DECLARE
 BEGIN
     IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
         RAISE EXCEPTION 'EDB-ENC0047 batch size must be a positive integer';
+    END IF;
+
+    IF current_setting('encrypt.enable') <> 'on' THEN
+        RAISE EXCEPTION 'EDB-ENC0048 encrypt.enable must be on for data re-encryption';
     END IF;
 
     SELECT format_type(a.atttypid, a.atttypmod)
