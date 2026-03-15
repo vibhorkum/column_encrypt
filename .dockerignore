@@ -1,0 +1,6 @@
+.git
+.github
+expected/*.tmp
+regression.diffs
+results
+tmp_check

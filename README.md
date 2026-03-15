@@ -10,6 +10,7 @@
 - [Requirements](#requirements)
 - [Architecture](#architecture)
 - [Installation](#installation)
+- [Docker Regression Testing](#docker-regression-testing)
 - [Configuration](#configuration)
 - [Usage](#usage)
 - [Functions Reference](#functions-reference)
@@ -99,6 +100,43 @@ The extension registers two custom base types (`encrypted_text`, `encrypted_byte
    ```sql
    CREATE EXTENSION column_encrypt;
    ```
+
+---
+
+## Docker Regression Testing
+
+If you do not want to install PostgreSQL development packages on your host, you can build and run the extension tests in Docker instead.
+
+Run the local regression harness against PostgreSQL 18:
+
+```bash
+./run-docker-regression.sh
+```
+
+Run against a specific supported version:
+
+```bash
+./run-docker-regression.sh 16
+./run-docker-regression.sh 17
+./run-docker-regression.sh 18
+```
+
+What the Docker harness does:
+
+- builds a throwaway Ubuntu-based test image
+- installs PostgreSQL server, contrib, and dev packages for the selected version
+- runs `make` and `make install`
+- initializes a temporary cluster with `shared_preload_libraries = 'column_encrypt'`
+- creates a test database and runs `make installcheck`
+
+Files involved:
+
+- `docker/Dockerfile`
+- `docker/run-regression.sh`
+- `docker/docker-compose.test.yml`
+- `run-docker-regression.sh`
+
+This path mirrors the GitHub Actions CI workflow closely, which makes local failures easier to compare with CI results.
 
 ---
 

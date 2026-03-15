@@ -129,9 +129,9 @@ SELECT COUNT(*) FROM cipher_key_logical_replication_check('public', 'test_enc_te
 
 DROP TABLE test_enc_text;
 DROP TABLE test_enc_bytea;
-
 SELECT rm_key_details();
  rm_key_details 
 ----------------
  t
 (1 row)
+
