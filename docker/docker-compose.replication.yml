@@ -1,0 +1,28 @@
+services:
+  publisher:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        PG_MAJOR: ${PG_MAJOR:-18}
+    command: ["bash", "-lc", "sleep infinity"]
+    environment:
+      PG_MAJOR: ${PG_MAJOR:-18}
+      REPO_DIR: /workspace
+    hostname: publisher
+    volumes:
+      - ..:/workspace
+
+  subscriber:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        PG_MAJOR: ${PG_MAJOR:-18}
+    command: ["bash", "-lc", "sleep infinity"]
+    environment:
+      PG_MAJOR: ${PG_MAJOR:-18}
+      REPO_DIR: /workspace
+    hostname: subscriber
+    volumes:
+      - ..:/workspace

@@ -106,6 +106,8 @@ PG_FUNCTION_INFO_V1(inet_enc_text);
 PG_FUNCTION_INFO_V1(xml_enc_text);
 PG_FUNCTION_INFO_V1(enc_text_regclass);
 PG_FUNCTION_INFO_V1(enc_hash_encrted_data);
+PG_FUNCTION_INFO_V1(enc_key_version_text);
+PG_FUNCTION_INFO_V1(enc_key_version_bytea);
 PG_FUNCTION_INFO_V1(enc_store_key);
 PG_FUNCTION_INFO_V1(enc_store_prv_key);
 PG_FUNCTION_INFO_V1(enc_rm_key);
@@ -230,17 +232,11 @@ suppress_keylog_hook(ErrorData *edata)
 				flag;
 	MemoryContext old_mem_context;
 
-	/* call the old one if exist */
-	if (prev_emit_log_hook)
-	{
-		prev_emit_log_hook(edata);
-	}
-
 	if (mask_key_log && !(being_hook))
 	{
 		/* Arguments of textregexreplace. */
-		regex = CStringGetTextDatum("[(].+[)]"),
-			mask = CStringGetTextDatum("(*****)"),
+		regex = CStringGetTextDatum("(register_cipher_key|load_key_by_version|load_key|enc_store_key|enc_store_prv_key)[[:space:]]*\\([^\\)]*\\)"),
+			mask = CStringGetTextDatum("column_encrypt_sensitive_call(*****)"),
 			flag = CStringGetTextDatum("g");
 
 		/* protect from recursive call */
@@ -400,6 +396,12 @@ suppress_keylog_hook(ErrorData *edata)
 			pfree((void *) flag);
 		/* protect from recursive call */
 		being_hook = false;
+	}
+
+	/* call the old one if exist */
+	if (prev_emit_log_hook)
+	{
+		prev_emit_log_hook(edata);
 	}
 }
 
@@ -744,6 +746,26 @@ enc_hash_encrted_data(PG_FUNCTION_ARGS)
 	PG_FREE_IF_COPY(cipher, 0);
 
 	return result;
+}
+
+Datum
+enc_key_version_text(PG_FUNCTION_ARGS)
+{
+	bytea	   *cipher = PG_GETARG_BYTEA_PP(0);
+	int			key_version = extract_key_version(cipher);
+
+	PG_FREE_IF_COPY(cipher, 0);
+	PG_RETURN_INT32(key_version);
+}
+
+Datum
+enc_key_version_bytea(PG_FUNCTION_ARGS)
+{
+	bytea	   *cipher = PG_GETARG_BYTEA_PP(0);
+	int			key_version = extract_key_version(cipher);
+
+	PG_FREE_IF_COPY(cipher, 0);
+	PG_RETURN_INT32(key_version);
 }
 
 

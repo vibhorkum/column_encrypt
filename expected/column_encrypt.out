@@ -1,6 +1,44 @@
 -- column_encrypt regression tests
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 CREATE EXTENSION IF NOT EXISTS column_encrypt;
+CREATE ROLE regress_admin LOGIN;
+CREATE ROLE regress_runtime LOGIN;
+CREATE ROLE regress_reader LOGIN;
+CREATE ROLE regress_app LOGIN;
+GRANT column_encrypt_admin TO regress_admin;
+GRANT column_encrypt_runtime TO regress_runtime;
+GRANT column_encrypt_reader TO regress_reader;
+SELECT has_function_privilege('regress_admin', 'register_cipher_key(text,text,text)', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ t
+(1 row)
+
+SELECT has_function_privilege('regress_runtime', 'load_key(text)', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ t
+(1 row)
+
+SELECT has_function_privilege('regress_runtime', 'register_cipher_key(text,text,text)', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ f
+(1 row)
+
+SELECT has_function_privilege('regress_reader', 'cipher_key_versions()', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ t
+(1 row)
+
+SELECT has_function_privilege('regress_app', 'load_key(text)', 'EXECUTE');
+ has_function_privilege 
+------------------------
+ f
+(1 row)
+
+SET ROLE regress_admin;
 SELECT cipher_key_disable_log();
  cipher_key_disable_log 
 ------------------------
@@ -13,18 +51,49 @@ SELECT register_cipher_key('my-data-encryption-key-v1', 'aes', 'my-master-passph
                    1
 (1 row)
 
-SELECT load_key('my-master-passphrase');
- load_key 
-----------
- t
-(1 row)
-
 SELECT cipher_key_enable_log();
  cipher_key_enable_log 
 -----------------------
  t
 (1 row)
 
+RESET ROLE;
+SET ROLE regress_runtime;
+SELECT load_key('my-master-passphrase');
+ load_key 
+----------
+ t
+(1 row)
+
+RESET ROLE;
+SET ROLE regress_runtime;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM register_cipher_key('unexpected', 'aes', 'unexpected');
+        RAISE EXCEPTION 'register_cipher_key unexpectedly succeeded';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'register_cipher_key denied for regress_runtime';
+    END;
+END;
+$$;
+NOTICE:  register_cipher_key denied for regress_runtime
+RESET ROLE;
+SET ROLE regress_app;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM load_key('my-master-passphrase');
+        RAISE EXCEPTION 'load_key unexpectedly succeeded';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'load_key denied for regress_app';
+    END;
+END;
+$$;
+NOTICE:  load_key denied for regress_app
+RESET ROLE;
 CREATE TABLE test_enc_text (id serial, ssn encrypted_text);
 INSERT INTO test_enc_text(ssn) VALUES ('123-45-6789');
 INSERT INTO test_enc_text(ssn) VALUES ('987-65-4321');
@@ -41,6 +110,12 @@ SELECT COUNT(*) FROM test_enc_text WHERE ssn = '123-45-6789'::encrypted_text;
      1
 (1 row)
 
+SELECT column_encrypt_blind_index_text('123-45-6789', 'blind-index-secret');
+                 column_encrypt_blind_index_text                  
+------------------------------------------------------------------
+ 67b1c1e63d848735da07ab813b9990ce56cbb199e541c364ec881141e4b6b897
+(1 row)
+
 CREATE TABLE test_enc_bytea (id serial, data encrypted_bytea);
 INSERT INTO test_enc_bytea(data) VALUES ('hello'::bytea);
 INSERT INTO test_enc_bytea(data) VALUES ('world'::bytea);
@@ -51,6 +126,13 @@ SELECT data FROM test_enc_bytea ORDER BY id;
  \x776f726c64
 (2 rows)
 
+SELECT column_encrypt_blind_index_bytea('hello'::bytea, 'blind-index-secret');
+                 column_encrypt_blind_index_bytea                 
+------------------------------------------------------------------
+ 639c2b12e8e37cef74791ea0f114e2fb3097513dfddbfaa365a72ba1145a6c8d
+(1 row)
+
+SET ROLE regress_admin;
 SELECT cipher_key_disable_log();
  cipher_key_disable_log 
 ------------------------
@@ -63,6 +145,14 @@ SELECT register_cipher_key('my-data-encryption-key-v2', 'aes', 'my-master-passph
                    2
 (1 row)
 
+SELECT cipher_key_enable_log();
+ cipher_key_enable_log 
+-----------------------
+ t
+(1 row)
+
+RESET ROLE;
+SET ROLE regress_runtime;
 SELECT load_key_by_version('my-master-passphrase', 1);
  load_key_by_version 
 ---------------------
@@ -75,7 +165,27 @@ SELECT load_key_by_version('my-master-passphrase', 2);
  t
 (1 row)
 
+RESET ROLE;
+SET encrypt.key_version = 1;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM load_key_by_version('wrong-passphrase', 2);
+    EXCEPTION
+        WHEN OTHERS THEN
+            RAISE NOTICE 'load_key_by_version failed as expected';
+    END;
+END;
+$$;
+NOTICE:  load_key_by_version failed as expected
+SHOW encrypt.key_version;
+ encrypt.key_version 
+---------------------
+ 1
+(1 row)
+
 SET encrypt.key_version = 2;
+SET ROLE regress_admin;
 SELECT cipher_key_reencrypt_data('public', 'test_enc_text', 'ssn');
  cipher_key_reencrypt_data 
 ---------------------------
@@ -94,12 +204,7 @@ SELECT activate_cipher_key(2);
  t
 (1 row)
 
-SELECT cipher_key_enable_log();
- cipher_key_enable_log 
------------------------
- t
-(1 row)
-
+RESET ROLE;
 SELECT ssn FROM test_enc_text ORDER BY id;
      ssn     
 -------------
@@ -114,12 +219,74 @@ SELECT data FROM test_enc_bytea ORDER BY id;
  \x776f726c64
 (2 rows)
 
-SELECT key_version, algorithm, is_active FROM cipher_key_versions() ORDER BY key_version;
- key_version | algorithm | is_active 
+CREATE TABLE test_batch_rotate (id integer PRIMARY KEY, val encrypted_text);
+INSERT INTO test_batch_rotate(id, val)
+SELECT gs, format('secret-%s', gs)
+FROM generate_series(1, 100) AS gs;
+SET ROLE regress_admin;
+SELECT cipher_key_disable_log();
+ cipher_key_disable_log 
+------------------------
+ t
+(1 row)
+
+SELECT register_cipher_key('my-data-encryption-key-v3', 'aes', 'my-master-passphrase', 3, false);
+ register_cipher_key 
+---------------------
+                   3
+(1 row)
+
+SELECT cipher_key_enable_log();
+ cipher_key_enable_log 
+-----------------------
+ t
+(1 row)
+
+RESET ROLE;
+SET ROLE regress_runtime;
+SELECT load_key_by_version('my-master-passphrase', 3);
+ load_key_by_version 
+---------------------
+ t
+(1 row)
+
+RESET ROLE;
+SET encrypt.key_version = 3;
+DO $$
+DECLARE
+    moved bigint;
+    total bigint := 0;
+BEGIN
+    LOOP
+        moved := cipher_key_reencrypt_data_batch('public', 'test_batch_rotate', 'val', 15);
+        EXIT WHEN moved = 0;
+        total := total + moved;
+    END LOOP;
+    RAISE NOTICE 'batch rotated % rows', total;
+END;
+$$;
+NOTICE:  batch rotated 100 rows
+SET ROLE regress_admin;
+SELECT activate_cipher_key(3);
+ activate_cipher_key 
+---------------------
+ t
+(1 row)
+
+RESET ROLE;
+SELECT COUNT(*) FROM test_batch_rotate WHERE val::text LIKE 'secret-%';
+ count 
+-------
+   100
+(1 row)
+
+SELECT key_version, algorithm, key_state FROM cipher_key_versions() ORDER BY key_version;
+ key_version | algorithm | key_state 
 -------------+-----------+-----------
-           1 | aes       | f
-           2 | aes       | t
-(2 rows)
+           1 | aes       | retired
+           2 | aes       | retired
+           3 | aes       | active
+(3 rows)
 
 SELECT COUNT(*) FROM cipher_key_logical_replication_check('public', 'test_enc_text');
  count 
@@ -129,6 +296,7 @@ SELECT COUNT(*) FROM cipher_key_logical_replication_check('public', 'test_enc_te
 
 DROP TABLE test_enc_text;
 DROP TABLE test_enc_bytea;
+DROP TABLE test_batch_rotate;
 SELECT rm_key_details();
  rm_key_details 
 ----------------

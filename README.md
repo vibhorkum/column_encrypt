@@ -35,9 +35,11 @@
 - **AES encryption** via the `pgcrypto` extension
 - **Key version header** embedded in every ciphertext for future key rotation tracking
 - **Version-aware decryption** using the ciphertext header and session-loaded keys
-- **Log masking** — an `emit_log_hook` prevents key material from appearing in PostgreSQL logs or `pg_stat_activity`
-- **Key registry metadata** with active/inactive versions and activation controls
-- **Key rotation** support with a built-in re-encryption helper function
+- **Tighter log masking** focused on known sensitive function calls rather than all parenthesized log text
+- **Role-based execution model** with dedicated admin, runtime, and reader roles
+- **Key registry metadata** with explicit `pending`, `active`, `retired`, and `revoked` states
+- **Key rotation** support with both full-table and batched re-encryption helpers
+- **Optional blind-index helpers** for scalable equality lookup patterns
 - **Hash/equality semantics on decrypted plaintext** so comparisons remain correct across key rotation
 - **Cast support** from `bool`, `inet`, `cidr`, `xml`, and `character` to `encrypted_text`
 - **Logical replication readiness check** for encrypted tables
@@ -60,7 +62,8 @@ The extension registers two custom base types (`encrypted_text`, `encrypted_byte
 - **On `SELECT`**: the type output function (`col_enc_text_out` / `col_enc_bytea_out`) transparently decrypts the stored ciphertext using the matching session-loaded key for that ciphertext version.
 - A **2-byte key version header** is prepended to every ciphertext and used during decryption and re-encryption workflows.
 - Keys are held in **`TopMemoryContext`** as a versioned in-memory keyring and are securely zeroed with `secure_memset` when removed from session memory.
-- An **`emit_log_hook`** masks `(...)` patterns in log messages (query text, detail, context, internal query) to prevent key material from leaking into `pg_log` or `pg_stat_activity`.
+- An **`emit_log_hook`** masks known sensitive key-management function calls in log messages (query text, detail, context, internal query) to reduce accidental key leakage.
+- Administrative and runtime functions are gated by dedicated extension roles instead of `PUBLIC` execution.
 - Binary protocol `SEND` / `RECEIVE` is intentionally rejected so clients cannot bypass the text I/O encryption path.
 
 ---
@@ -168,7 +171,7 @@ SELECT cipher_key_enable_log();
 
 ### Step 2 — Load the key in your session
 
-In each new session, load the DEK into session memory before accessing encrypted columns. Always call `cipher_key_disable_log()` first to prevent the passphrase from appearing in logs:
+In each new session, load the DEK into session memory before accessing encrypted columns. Only roles granted `column_encrypt_runtime` should be allowed to do this. Always call `cipher_key_disable_log()` first to prevent the passphrase from appearing in logs:
 
 ```sql
 SELECT cipher_key_disable_log();
@@ -236,8 +239,12 @@ This is also expected — an incorrect passphrase is rejected.
 | `enc_rm_key()` | `boolean` | Securely removes all loaded DEKs from session memory (zeroes the key bytes). |
 | `enc_rm_prv_key()` | `boolean` | Compatibility alias for clearing the loaded keyring. |
 | `cipher_key_reencrypt_data(schema text, table text, column text)` | `bigint` | Re-encrypts all values in the specified encrypted column using the new key (reads with previous key, writes with current key). Returns the number of rows re-encrypted. |
+| `cipher_key_reencrypt_data_batch(schema text, table text, column text, batch_size integer)` | `bigint` | Re-encrypts a bounded batch of rows at a time so callers can rotate large tables incrementally. |
 | `activate_cipher_key(key_version integer)` | `boolean` | Marks one registered key version as active and retires the previously active version. |
+| `revoke_cipher_key(key_version integer)` | `boolean` | Marks a stored key version as revoked so it can no longer be loaded. |
 | `cipher_key_versions()` | `setof record` | Lists registered key versions and their metadata. |
+| `column_encrypt_blind_index_text(plaintext text, blind_index_key text)` | `text` | Returns a SHA-256 HMAC blind index for companion lookup columns. |
+| `column_encrypt_blind_index_bytea(plaintext bytea, blind_index_key text)` | `text` | Returns a SHA-256 HMAC blind index for binary payloads. |
 | `cipher_key_logical_replication_check(schema text, table text)` | `setof record` | Returns local readiness checks and warnings for logical replication of encrypted tables. |
 
 ---
@@ -257,11 +264,22 @@ All parameters require **superuser** (`PGC_SUSET`) to change.
 ## Security Model
 
 - **`cipher_key_table`** stores versioned wrapped keys, activation metadata, and timestamps. Direct table access is revoked from `PUBLIC`.
-- Administrative key operations (`register_cipher_key`, `activate_cipher_key`, `cipher_key_reencrypt_data`, `cipher_key_disable_log`, `cipher_key_enable_log`) use **`SECURITY DEFINER`** to execute with elevated privileges.
+- Administrative key operations use **`SECURITY DEFINER`**, but execution is no longer granted to `PUBLIC`.
+- `column_encrypt_admin` owns registration, activation, revocation, re-encryption, and operational logging controls.
+- `column_encrypt_runtime` is intended for application roles that are allowed to load keys and clear their session keyring. If you want to prevent most application roles from loading keys, do not grant this role broadly.
+- `column_encrypt_reader` is intended for read-only metadata and replication-readiness inspection.
 - **`encrypt.enable`** is `PGC_SUSET` — only superusers can enable or disable encryption. This prevents unprivileged users from bypassing encryption by toggling the GUC.
 - Low-level helper functions such as `enc_store_key`, `enc_store_prv_key`, and `pgstat_actv_mask` are revoked from `PUBLIC`.
 - Encryption keys stored in C session memory are **zeroed with `secure_memset`** when removed, preventing key material from lingering in process memory.
-- The **`emit_log_hook`** masks `(...)` patterns in all of the following log fields to prevent keys from leaking: query text, detail message, context message, and internal query message.
+- The **`emit_log_hook`** only targets known sensitive key-management function calls. It is a defense-in-depth measure, not a substitute for cautious operational handling of passphrases.
+
+Example grants:
+
+```sql
+GRANT column_encrypt_admin TO security_admin;
+GRANT column_encrypt_runtime TO app_runtime;
+GRANT column_encrypt_reader TO audit_reader;
+```
 
 ### Key Encryption Key (KEK) vs Data Encryption Key (DEK)
 
@@ -279,7 +297,7 @@ All parameters require **superuser** (`PGC_SUSET`) to change.
 To rotate the encryption key, follow these steps in a single superuser session:
 
 ```sql
--- Step 1: Disable logging and register the next key version as inactive
+-- Step 1: Disable logging and register the next key version as pending
 SELECT cipher_key_disable_log();
 SELECT register_cipher_key('new-data-key', 'aes', 'my-master-passphrase', 2, false);
 
@@ -290,6 +308,9 @@ SET encrypt.key_version = 2;
 
 -- Step 3: Re-encrypt all data in the encrypted column
 SELECT cipher_key_reencrypt_data('public', 'secure_data', 'ssn');
+
+-- Or rotate incrementally in batches for large tables
+SELECT cipher_key_reencrypt_data_batch('public', 'secure_data', 'ssn', 5000);
 
 -- Step 4: Activate the new version
 SELECT activate_cipher_key(2);
@@ -318,7 +339,47 @@ FROM cipher_key_logical_replication_check('public', 'secure_data');
 
 This highlights local issues such as `wal_level`, encrypted columns, and replica identity usage.
 
+For local end-to-end testing, the branch also includes a Docker-based logical replication harness so publisher/subscriber behavior can be exercised beyond the static readiness helper.
+
+## Blind Indexing
+
+For scalable equality lookups, prefer a companion blind-index column over direct comparisons on encrypted columns.
+
+Example:
+
+```sql
+ALTER TABLE secure_data ADD COLUMN ssn_blind_index text;
+
+UPDATE secure_data
+SET ssn_blind_index = column_encrypt_blind_index_text('888-999-2045', 'blind-index-secret');
+```
+
+The blind-index key should be managed separately from the DEK/KEK used for encryption.
+
 ---
+
+## Logical Replication
+
+Logical replication of encrypted columns works when replication transports ciphertext rather than plaintext. The branch includes a Docker harness that validates this model end to end.
+
+Recommended pattern:
+
+- Use a dedicated publisher-side replication user with `ALTER ROLE ... SET encrypt.enable = off` so logical decoding emits raw ciphertext instead of decrypted plaintext.
+- Use a dedicated subscriber-side subscription owner/apply-worker role with `ALTER ROLE ... SET encrypt.enable = off` so replicated ciphertext is stored directly without requiring a backend-local loaded key.
+- Keep normal application sessions on the default `encrypt.enable = on` path and load keys only in roles that were explicitly granted `column_encrypt_runtime`.
+- Load the key only in interactive/application sessions that need to read decrypted values; replication workers should replicate ciphertext, not plaintext.
+
+Run the local integration harness:
+
+```bash
+./run-docker-logical-replication.sh 18
+```
+
+Files involved:
+
+- `docker/docker-compose.replication.yml`
+- `docker/run-logical-replication.sh`
+- `run-docker-logical-replication.sh`
 
 ## Supported Algorithms
 
