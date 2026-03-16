@@ -1,7 +1,7 @@
 #include <unistd.h>
-#include <arpa/inet.h>
 
 #include "postgres.h"
+#include "port/pg_bswap.h"
 #include "fmgr.h"
 #include "pgstat.h"
 #include "utils/guc.h"
@@ -1180,7 +1180,7 @@ add_header_to_encrpt_data(bytea *encrypted_data)
 
 	/* add key version header in network byte order for cross-platform compatibility */
 	SET_VARSIZE(result, VARSIZE(encrypted_data) + sizeof(uint16_t));
-	key_ver_net = htons((uint16_t) current_key_version);
+	key_ver_net = pg_hton16((uint16_t) current_key_version);
 	memcpy(VARDATA(result), &key_ver_net, sizeof(uint16_t));
 	memcpy((VARDATA(result) + sizeof(uint16_t)), VARDATA_ANY(encrypted_data),
 		   VARSIZE_ANY_EXHDR(encrypted_data));
@@ -1225,7 +1225,7 @@ extract_key_version(bytea *input_data)
 	}
 
 	memcpy(&key_ver_net, VARDATA_ANY(input_data), sizeof(uint16_t));
-	key_ver = (int) ntohs(key_ver_net);
+	key_ver = (int) pg_ntoh16(key_ver_net);
 	if (key_ver <= 0 || key_ver > 32767)
 	{
 		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
@@ -1239,12 +1239,38 @@ bytea *
 decrypt_ciphertext(bytea *input_data)
 {
 	int			key_version;
+	int			key_version_native;
+	uint16_t	key_ver_raw;
 	key_detail  *entry;
 	bytea	   *encrypted_data;
 	bytea	   *plain_data;
 
 	key_version = extract_key_version(input_data);
 	entry = find_key_detail(key_version);
+
+	/*
+	 * Backward compatibility: if no key found for network byte order version,
+	 * try native byte order (for data written before network byte order was used).
+	 */
+	if (entry == NULL && VARSIZE_ANY_EXHDR(input_data) >= (int) sizeof(uint16_t))
+	{
+		memcpy(&key_ver_raw, VARDATA_ANY(input_data), sizeof(uint16_t));
+		key_version_native = (int) key_ver_raw;  /* native byte order */
+
+		if (key_version_native != key_version &&
+			key_version_native > 0 && key_version_native <= 32767)
+		{
+			entry = find_key_detail(key_version_native);
+			if (entry != NULL)
+			{
+				ereport(WARNING,
+						(errmsg("decrypting data with legacy native byte order key version %d; consider re-encrypting data",
+								key_version_native)));
+				key_version = key_version_native;
+			}
+		}
+	}
+
 	encrypted_data = rm_header_frm_encrpt_input(input_data);
 	plain_data = DatumGetByteaPP(pg_col_decrypt(entry, encrypted_data));
 	pfree(encrypted_data);

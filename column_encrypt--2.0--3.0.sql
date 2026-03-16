@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS public.cipher_key_audit_log (
     id bigserial PRIMARY KEY,
     operation text NOT NULL,
     key_version integer,
-    performed_by name NOT NULL DEFAULT current_user,
+    performed_by name NOT NULL DEFAULT session_user,
     performed_at timestamptz NOT NULL DEFAULT now(),
     details jsonb DEFAULT NULL
 );
@@ -216,7 +216,7 @@ BEGIN
     END IF;
 
     /* DEK must be at least 16 bytes for AES-128 security */
-    IF length(cipher_key) < 16 THEN
+    IF octet_length(cipher_key) < 16 THEN
         RAISE EXCEPTION 'EDB-ENC0049 cipher key must be at least 16 bytes for cryptographic strength';
     END IF;
 
