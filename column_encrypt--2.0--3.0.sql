@@ -176,10 +176,6 @@ DECLARE
 BEGIN
     PERFORM pgstat_actv_mask();
 
-    IF current_setting('encrypt.enable') <> 'on' THEN
-        RAISE EXCEPTION 'EDB-ENC0048 encrypt.enable must be on for data re-encryption';
-    END IF;
-
     IF cipher_key IS NULL OR cipher_key = '' THEN
         RAISE EXCEPTION 'EDB-ENC0002 new cipher key is invalid';
     END IF;

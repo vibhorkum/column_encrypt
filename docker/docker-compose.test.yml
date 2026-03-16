@@ -9,6 +9,7 @@ services:
     environment:
       PG_MAJOR: ${PG_MAJOR:-18}
       REPO_DIR: /workspace
+      BUILD_DIR: /tmp/column-encrypt-src
     working_dir: /workspace
     volumes:
-      - ..:/workspace
+      - ..:/workspace:ro

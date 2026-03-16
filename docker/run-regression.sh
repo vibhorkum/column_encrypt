@@ -2,6 +2,7 @@
 set -euo pipefail
 
 REPO_DIR="${REPO_DIR:-/workspace}"
+BUILD_DIR="${BUILD_DIR:-/tmp/column-encrypt-src}"
 PG_MAJOR="${PG_MAJOR:-18}"
 PG_BINDIR="${PG_BINDIR:-/usr/lib/postgresql/${PG_MAJOR}/bin}"
 export PATH="${PG_BINDIR}:$PATH"
@@ -32,7 +33,11 @@ cleanup() {
 
 trap cleanup EXIT
 
-cd "${REPO_DIR}"
+rm -rf "${BUILD_DIR}"
+mkdir -p "${BUILD_DIR}"
+cp -a "${REPO_DIR}/." "${BUILD_DIR}/"
+
+cd "${BUILD_DIR}"
 rm -rf "${PGDATA}"
 mkdir -p "${PGDATA}"
 chown -R postgres:postgres "${PGDATA}"

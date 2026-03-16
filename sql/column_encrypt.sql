@@ -152,6 +152,9 @@ BEGIN
         PERFORM load_key_by_version('wrong-passphrase', 2);
     EXCEPTION
         WHEN OTHERS THEN
+            IF SQLERRM NOT LIKE 'EDB-ENC0012 %' THEN
+                RAISE;
+            END IF;
             RAISE NOTICE 'load_key_by_version failed as expected';
     END;
 END;
@@ -192,6 +195,9 @@ BEGIN
         RAISE EXCEPTION 'cipher_key_reencrypt_data_batch unexpectedly succeeded with encrypt.enable=off';
     EXCEPTION
         WHEN OTHERS THEN
+            IF SQLERRM NOT LIKE 'EDB-ENC0048 %' THEN
+                RAISE;
+            END IF;
             RAISE NOTICE 'cipher_key_reencrypt_data_batch blocked when encrypt.enable is off';
     END;
 END;

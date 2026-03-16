@@ -158,7 +158,7 @@ _PG_init(void)
 	emit_log_hook = suppress_keylog_hook;
 
 	DefineCustomBoolVariable("encrypt.mask_key_log",
-							 "mask query log messages, string within () mark will be masked by *****",
+							 "mask known sensitive key-management function calls in log messages",
 							 NULL,
 							 &mask_key_log,
 							 true,
@@ -212,8 +212,8 @@ _PG_fini(void)
 /*
  * Function : suppress_keylog_hook
  * ---------------------
- * Mask query log messages.
- * String in "()" mark will be quoted by *****.
+ * Mask known sensitive key-management function calls in query text and
+ * related log fields.
  *
  * @param    *char ARG[0]        input ErrorData*
  * @return    nothing
@@ -243,9 +243,9 @@ suppress_keylog_hook(ErrorData *edata)
 	if (mask_key_log && !(being_hook))
 	{
 		/* Arguments of textregexreplace. */
-		regex = CStringGetTextDatum("(register_cipher_key|load_key_by_version|load_key|enc_store_key|enc_store_prv_key)[[:space:]]*\\([^\\)]*\\)"),
+		regex = CStringGetTextDatum("((\"?[A-Za-z_][A-Za-z0-9_]*\"?[[:space:]]*\\.[[:space:]]*)*\"?(register_cipher_key|load_key_by_version|load_key|enc_store_key|enc_store_prv_key)\"?[[:space:]]*\\([^\\)]*\\))"),
 			mask = CStringGetTextDatum("column_encrypt_sensitive_call(*****)"),
-			flag = CStringGetTextDatum("g");
+			flag = CStringGetTextDatum("gi");
 
 		/* protect from recursive call */
 		being_hook = true;

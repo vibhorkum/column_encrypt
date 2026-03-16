@@ -162,7 +162,7 @@ After installation, the following GUC parameters are available (see [GUC Paramet
 | Parameter | Default | Description |
 |---|---|---|
 | `encrypt.enable` | `on` | Enable/disable column encryption (superuser only) |
-| `encrypt.mask_key_log` | `on` | Mask key material in PostgreSQL logs (superuser only) |
+| `encrypt.mask_key_log` | `on` | Mask known sensitive key-management calls in PostgreSQL logs (superuser only) |
 | `encrypt.key_version` | `1` | Key version written into ciphertext header (superuser only) |
 
 ---
@@ -269,7 +269,7 @@ All parameters require **superuser** (`PGC_SUSET`) to change.
 | Parameter | Type | Default | Range | Description |
 |---|---|---|---|---|
 | `encrypt.enable` | `bool` | `on` | — | Enables or disables column encryption globally. This is independent from the log masking helper functions. |
-| `encrypt.mask_key_log` | `bool` | `on` | — | When enabled, masks known sensitive key-management function calls in PostgreSQL log messages as a defense-in-depth control. |
+| `encrypt.mask_key_log` | `bool` | `on` | — | When enabled, masks known sensitive key-management function calls, including case-variant and schema-qualified forms, in PostgreSQL log messages as a defense-in-depth control. |
 | `encrypt.key_version` | `int` | `1` | `1–32767` | Key version number written into the 2-byte ciphertext header. Increment this when rotating keys to track which version encrypted each value. |
 
 ---
