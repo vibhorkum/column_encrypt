@@ -274,10 +274,10 @@ suppress_keylog_hook(ErrorData *edata)
 	 */
 	Datum		convertedMsg,
 				replaceMsg_tmp,
-				regex,
+				regex = 0,
 				regex_param,
-				mask,
-				flag;
+				mask = 0,
+				flag = 0;
 	MemoryContext old_mem_context;
 
 	/* Let earlier hooks mutate ErrorData first so our masking is the last step. */
