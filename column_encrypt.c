@@ -1239,8 +1239,6 @@ bytea *
 decrypt_ciphertext(bytea *input_data)
 {
 	int			key_version;
-	int			key_version_native;
-	uint16_t	key_ver_raw;
 	key_detail  *entry;
 	bytea	   *encrypted_data;
 	bytea	   *plain_data;
@@ -1254,6 +1252,9 @@ decrypt_ciphertext(bytea *input_data)
 	 */
 	if (entry == NULL && VARSIZE_ANY_EXHDR(input_data) >= (int) sizeof(uint16_t))
 	{
+		uint16_t	key_ver_raw;
+		int			key_version_native;
+
 		memcpy(&key_ver_raw, VARDATA_ANY(input_data), sizeof(uint16_t));
 		key_version_native = (int) key_ver_raw;  /* native byte order */
 
@@ -1266,7 +1267,6 @@ decrypt_ciphertext(bytea *input_data)
 				ereport(WARNING,
 						(errmsg("decrypting data with legacy native byte order key version %d; consider re-encrypting data",
 								key_version_native)));
-				key_version = key_version_native;
 			}
 		}
 	}
