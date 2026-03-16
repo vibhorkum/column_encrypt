@@ -85,6 +85,7 @@ bytea	   *add_header_to_encrpt_data(bytea *encrypted_data);
 bytea	   *rm_header_frm_encrpt_input(bytea *input_data);
 bool		binary_comparison(bytea *barg1, bytea *barg2);
 int			extract_key_version(bytea *input_data);
+void		extract_key_versions_raw(bytea *input_data, int *network_ver, int *native_ver);
 bytea	   *decrypt_ciphertext(bytea *input_data);
 
 key_detail *create_key_detail(text *key, text *algorithm, int version);
@@ -1247,11 +1248,17 @@ rm_header_frm_encrpt_input(bytea *input_data)
 	return encrypted_data;
 }
 
-int
-extract_key_version(bytea *input_data)
+/*
+ * Extract both network byte order and native byte order key version
+ * interpretations from the ciphertext header without validation.
+ * Returns -1 for interpretations that are out of valid range (1-32767).
+ */
+void
+extract_key_versions_raw(bytea *input_data, int *network_ver, int *native_ver)
 {
-	uint16_t	key_ver_net;
-	int			key_ver;
+	uint16_t	key_ver_raw;
+	int			net_ver;
+	int			nat_ver;
 
 	if (VARSIZE_ANY_EXHDR(input_data) < (int) sizeof(uint16_t))
 	{
@@ -1259,79 +1266,94 @@ extract_key_version(bytea *input_data)
 						errmsg("encrypted value is malformed: missing key version header")));
 	}
 
-	memcpy(&key_ver_net, VARDATA_ANY(input_data), sizeof(uint16_t));
-	key_ver = (int) pg_ntoh16(key_ver_net);
-	if (key_ver <= 0 || key_ver > 32767)
-	{
-		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
-						errmsg("encrypted value uses an invalid key version %d (must be 1-32767)", key_ver)));
-	}
+	memcpy(&key_ver_raw, VARDATA_ANY(input_data), sizeof(uint16_t));
 
-	return key_ver;
+	/* Network byte order interpretation (current format) */
+	net_ver = (int) pg_ntoh16(key_ver_raw);
+	*network_ver = (net_ver > 0 && net_ver <= 32767) ? net_ver : -1;
+
+	/* Native byte order interpretation (legacy format) */
+	nat_ver = (int) key_ver_raw;
+	*native_ver = (nat_ver > 0 && nat_ver <= 32767) ? nat_ver : -1;
+}
+
+/*
+ * Extract key version from ciphertext header.
+ * Prefers network byte order but falls back to native byte order
+ * for backward compatibility with legacy data.
+ */
+int
+extract_key_version(bytea *input_data)
+{
+	int			network_ver;
+	int			native_ver;
+
+	extract_key_versions_raw(input_data, &network_ver, &native_ver);
+
+	/* Prefer network byte order if valid */
+	if (network_ver > 0)
+		return network_ver;
+
+	/* Fall back to native byte order for legacy data */
+	if (native_ver > 0)
+		return native_ver;
+
+	/* Neither interpretation is valid */
+	ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+					errmsg("encrypted value uses an invalid key version (must be 1-32767)")));
+	return -1;  /* unreachable, but satisfies static analyzers */
 }
 
 bytea *
 decrypt_ciphertext(bytea *input_data)
 {
 	static bool legacy_warning_emitted = false;
-	int			key_version;
-	key_detail  *entry;
+	int			network_ver;
+	int			native_ver;
+	key_detail  *network_entry = NULL;
 	key_detail  *native_entry = NULL;
 	bytea	   *encrypted_data;
 	bytea	   *plain_data = NULL;
-	bool		try_native_fallback = false;
-
-	key_version = extract_key_version(input_data);
-	entry = find_key_detail(key_version);
 
 	/*
-	 * Precompute native byte order version for backward compatibility.
-	 * Legacy data was written with native byte order before we switched
-	 * to network byte order for cross-platform compatibility.
+	 * Extract both byte order interpretations without validation errors.
+	 * This allows legacy data (where network-order interpretation may exceed
+	 * 32767) to still be decrypted using native byte order.
 	 */
-	if (VARSIZE_ANY_EXHDR(input_data) >= (int) sizeof(uint16_t))
-	{
-		uint16_t	key_ver_raw;
-		int			key_version_native;
+	extract_key_versions_raw(input_data, &network_ver, &native_ver);
 
-		memcpy(&key_ver_raw, VARDATA_ANY(input_data), sizeof(uint16_t));
-		key_version_native = (int) key_ver_raw;  /* native byte order */
+	/* Look up keys for each valid interpretation */
+	if (network_ver > 0)
+		network_entry = find_key_detail(network_ver);
+	if (native_ver > 0 && native_ver != network_ver)
+		native_entry = find_key_detail(native_ver);
 
-		if (key_version_native != key_version &&
-			key_version_native > 0 && key_version_native <= 32767)
-		{
-			native_entry = find_key_detail(key_version_native);
-			try_native_fallback = (native_entry != NULL);
-		}
-	}
+	encrypted_data = rm_header_frm_encrpt_input(input_data);
 
 	/*
-	 * If no key found for network byte order version, try native byte order
-	 * directly without attempting decryption first.
+	 * Decryption strategy:
+	 * 1. If only native key is available, use it directly (legacy data)
+	 * 2. If only network key is available, use it directly (current format)
+	 * 3. If both keys are available, try network first, fall back to native
+	 * 4. If neither key is available, report error
 	 */
-	if (entry == NULL && native_entry != NULL)
+	if (network_entry == NULL && native_entry != NULL)
 	{
-		entry = native_entry;
-		try_native_fallback = false;  /* already using native */
+		/* Only native key available - legacy data */
 		if (!legacy_warning_emitted)
 		{
 			legacy_warning_emitted = true;
 			ereport(WARNING,
 					(errmsg("decrypting data with legacy native byte order key version; consider re-encrypting data")));
 		}
+		plain_data = DatumGetByteaPP(pg_col_decrypt(native_entry, encrypted_data));
 	}
-
-	encrypted_data = rm_header_frm_encrpt_input(input_data);
-
-	/*
-	 * Attempt decryption. If it fails and we have a native byte order
-	 * fallback available, try that before giving up.
-	 */
-	if (entry != NULL && try_native_fallback)
+	else if (network_entry != NULL && native_entry != NULL)
 	{
+		/* Both keys available - try network first, fall back to native */
 		PG_TRY();
 		{
-			plain_data = DatumGetByteaPP(pg_col_decrypt(entry, encrypted_data));
+			plain_data = DatumGetByteaPP(pg_col_decrypt(network_entry, encrypted_data));
 		}
 		PG_CATCH();
 		{
@@ -1350,10 +1372,25 @@ decrypt_ciphertext(bytea *input_data)
 		}
 		PG_END_TRY();
 	}
+	else if (network_entry != NULL)
+	{
+		/* Only network key available - current format */
+		plain_data = DatumGetByteaPP(pg_col_decrypt(network_entry, encrypted_data));
+	}
 	else
 	{
-		/* No fallback available; let errors propagate normally */
-		plain_data = DatumGetByteaPP(pg_col_decrypt(entry, encrypted_data));
+		/* No key available for either interpretation */
+		pfree(encrypted_data);
+		if (network_ver > 0)
+			ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
+							errmsg("cannot decrypt data, because no key was loaded for version %d", network_ver)));
+		else if (native_ver > 0)
+			ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
+							errmsg("cannot decrypt data, because no key was loaded for version %d", native_ver)));
+		else
+			ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+							errmsg("encrypted value uses an invalid key version (must be 1-32767)")));
+		return NULL;  /* unreachable, but satisfies static analyzers */
 	}
 
 	pfree(encrypted_data);
