@@ -416,7 +416,7 @@ SELECT COUNT(*) FROM test_batch_rotate WHERE val::text LIKE 'secret-%';
 (1 row)
 
 SELECT key_version, algorithm, key_state FROM cipher_key_versions() ORDER BY key_version;
- key_version | algorithm | key_state
+ key_version | algorithm | key_state 
 -------------+-----------+-----------
            1 | aes       | retired
            2 | aes       | retired
@@ -486,7 +486,7 @@ DROP TABLE test_off_mode_bytea;
 -- Test: DEK minimum length validation (should fail with short key)
 SET ROLE regress_admin;
 SELECT cipher_key_disable_log();
- cipher_key_disable_log
+ cipher_key_disable_log 
 ------------------------
  t
 (1 row)
@@ -507,7 +507,7 @@ END;
 $$;
 NOTICE:  short DEK rejected as expected
 SELECT cipher_key_enable_log();
- cipher_key_enable_log
+ cipher_key_enable_log 
 -----------------------
  t
 (1 row)
@@ -516,7 +516,7 @@ RESET ROLE;
 -- Test: NULL value handling in encrypted columns
 SET ROLE regress_runtime;
 SELECT load_key('my-master-passphrase');
- load_key
+ load_key 
 ----------
  t
 (1 row)
@@ -526,13 +526,13 @@ CREATE TABLE test_null_handling (id serial, val encrypted_text);
 INSERT INTO test_null_handling(val) VALUES (NULL);
 INSERT INTO test_null_handling(val) VALUES ('not-null');
 SELECT COUNT(*) FROM test_null_handling WHERE val IS NULL;
- count
+ count 
 -------
      1
 (1 row)
 
 SELECT COUNT(*) FROM test_null_handling WHERE val IS NOT NULL;
- count
+ count 
 -------
      1
 (1 row)
@@ -544,15 +544,18 @@ INSERT INTO test_equality(val) VALUES ('same-value');
 INSERT INTO test_equality(val) VALUES ('same-value');
 INSERT INTO test_equality(val) VALUES ('different-value');
 SELECT COUNT(*) FROM test_equality WHERE val = 'same-value'::encrypted_text;
- count
+ count 
 -------
      2
 (1 row)
 
-SELECT COUNT(DISTINCT val) FROM test_equality;
- count
--------
-     2
+-- Note: COUNT(DISTINCT) not supported as encrypted types don't have ordering operators
+SELECT COUNT(*) AS distinct_count FROM (
+    SELECT val FROM test_equality GROUP BY val
+) sub;
+ distinct_count 
+----------------
+              2
 (1 row)
 
 DROP TABLE test_equality;
@@ -560,12 +563,19 @@ DROP TABLE test_equality;
 CREATE TABLE test_hash (id serial, val encrypted_text);
 INSERT INTO test_hash(val) VALUES ('hash-test');
 INSERT INTO test_hash(val) VALUES ('hash-test');
-SELECT enc_hash_enctext(val) AS h1, enc_hash_enctext(val) AS h2,
-       enc_hash_enctext(val) = enc_hash_enctext(val) AS same_hash
+-- Hash should be consistent for same plaintext value
+SELECT (enc_hash_enctext(val) = enc_hash_enctext(val)) AS hash_consistent
 FROM test_hash LIMIT 1;
-     h1      |     h2      | same_hash
--------------+-------------+-----------
- -1491470073 | -1491470073 | t
+ hash_consistent 
+-----------------
+ t
+(1 row)
+
+-- Both rows with same plaintext should have same hash
+SELECT COUNT(DISTINCT enc_hash_enctext(val)) AS unique_hashes FROM test_hash;
+ unique_hashes 
+---------------
+             1
 (1 row)
 
 DROP TABLE test_hash;
@@ -588,7 +598,8 @@ $$;
 NOTICE:  cipher_key_reencrypt_data blocked when encrypt.enable is off
 SET encrypt.enable = on;
 SELECT rm_key_details();
- rm_key_details
+ rm_key_details 
 ----------------
  t
 (1 row)
+

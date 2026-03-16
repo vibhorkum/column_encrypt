@@ -290,16 +290,21 @@ INSERT INTO test_equality(val) VALUES ('same-value');
 INSERT INTO test_equality(val) VALUES ('same-value');
 INSERT INTO test_equality(val) VALUES ('different-value');
 SELECT COUNT(*) FROM test_equality WHERE val = 'same-value'::encrypted_text;
-SELECT COUNT(DISTINCT val) FROM test_equality;
+-- Note: COUNT(DISTINCT) not supported as encrypted types don't have ordering operators
+SELECT COUNT(*) AS distinct_count FROM (
+    SELECT val FROM test_equality GROUP BY val
+) sub;
 DROP TABLE test_equality;
 
 -- Test: Hash consistency for encrypted values
 CREATE TABLE test_hash (id serial, val encrypted_text);
 INSERT INTO test_hash(val) VALUES ('hash-test');
 INSERT INTO test_hash(val) VALUES ('hash-test');
-SELECT enc_hash_enctext(val) AS h1, enc_hash_enctext(val) AS h2,
-       enc_hash_enctext(val) = enc_hash_enctext(val) AS same_hash
+-- Hash should be consistent for same plaintext value
+SELECT (enc_hash_enctext(val) = enc_hash_enctext(val)) AS hash_consistent
 FROM test_hash LIMIT 1;
+-- Both rows with same plaintext should have same hash
+SELECT COUNT(DISTINCT enc_hash_enctext(val)) AS unique_hashes FROM test_hash;
 DROP TABLE test_hash;
 
 -- Test: cipher_key_reencrypt_data with encrypt.enable=off should fail

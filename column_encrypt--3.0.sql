@@ -507,31 +507,28 @@ BEGIN
         p_description
     );
 
-    /* Log the operation */
-    INSERT INTO cipher_key_audit_log(operation, key_version, details)
-    VALUES(
-        'register',
-        p_key_version,
-        jsonb_build_object(
-            'make_active', p_make_active,
-            'expires_at', p_expires_at,
-            'description', p_description
-        )
-    );
+    /* Log the operation (non-fatal if logging fails) */
+    BEGIN
+        INSERT INTO cipher_key_audit_log(operation, key_version, details)
+        VALUES(
+            'register',
+            p_key_version,
+            jsonb_build_object(
+                'make_active', p_make_active,
+                'expires_at', p_expires_at,
+                'description', p_description
+            )
+        );
+    EXCEPTION
+        WHEN OTHERS THEN
+            /* Audit logging failure should not prevent key registration */
+            NULL;
+    END;
 
 	RETURN p_key_version;
 END;
 $$;
 
-/* Backward-compatible 5-argument version */
-CREATE FUNCTION register_cipher_key(text, text, text, integer, boolean) RETURNS integer
-    LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
-    AS $_$
-BEGIN
-    RETURN register_cipher_key($1, $2, $3, $4, $5, NULL, NULL);
-END;
-$_$;
 
 CREATE FUNCTION register_cipher_key(text, text, text) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER
@@ -768,8 +765,16 @@ BEGIN
          WHERE key_state <> 'revoked';
 
         PERFORM set_config('encrypt.key_version', requested_version::text, false);
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF old_key_version IS NOT NULL THEN
+                PERFORM set_config('encrypt.key_version', old_key_version, false);
+            END IF;
+            RAISE;
+    END;
 
-        /* Log the operation */
+    /* Log the operation (non-fatal if logging fails) */
+    BEGIN
         INSERT INTO cipher_key_audit_log(operation, key_version, details)
         VALUES(
             'activate',
@@ -778,10 +783,7 @@ BEGIN
         );
     EXCEPTION
         WHEN OTHERS THEN
-            IF old_key_version IS NOT NULL THEN
-                PERFORM set_config('encrypt.key_version', old_key_version, false);
-            END IF;
-            RAISE;
+            NULL;
     END;
 
     RETURN TRUE;
@@ -807,13 +809,18 @@ BEGIN
      WHERE key_version = requested_version;
 
     IF FOUND THEN
-        /* Log the operation */
-        INSERT INTO cipher_key_audit_log(operation, key_version, details)
-        VALUES(
-            'revoke',
-            requested_version,
-            jsonb_build_object('previous_state', old_state)
-        );
+        /* Log the operation (non-fatal if logging fails) */
+        BEGIN
+            INSERT INTO cipher_key_audit_log(operation, key_version, details)
+            VALUES(
+                'revoke',
+                requested_version,
+                jsonb_build_object('previous_state', old_state)
+            );
+        EXCEPTION
+            WHEN OTHERS THEN
+                NULL;
+        END;
     END IF;
 
     RETURN FOUND;
@@ -1175,7 +1182,6 @@ $$;
 REVOKE EXECUTE ON FUNCTION cipher_key_disable_log() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION cipher_key_enable_log() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION register_cipher_key(text, text, text) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION register_cipher_key(text, text, text, integer, boolean) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION register_cipher_key(text, text, text, integer, boolean, timestamptz, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION cipher_key_check_expired() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION cipher_key_audit_log_view(integer, integer) FROM PUBLIC;
@@ -1203,7 +1209,6 @@ REVOKE EXECUTE ON FUNCTION pgstat_actv_mask() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION cipher_key_disable_log() TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION cipher_key_enable_log() TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION register_cipher_key(text, text, text) TO column_encrypt_admin;
-GRANT EXECUTE ON FUNCTION register_cipher_key(text, text, text, integer, boolean) TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION register_cipher_key(text, text, text, integer, boolean, timestamptz, text) TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION cipher_key_check_expired() TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION cipher_key_audit_log_view(integer, integer) TO column_encrypt_admin;
