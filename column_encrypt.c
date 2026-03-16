@@ -1,4 +1,5 @@
 #include <unistd.h>
+#include <arpa/inet.h>
 
 #include "postgres.h"
 #include "fmgr.h"
@@ -1073,19 +1074,20 @@ pg_col_decrypt(key_detail * entry, bytea *encrypted_data)
 	return result;
 }
 
-/* add the legacy 2-byte native-endian version header to encrypted data */
+/* add 2-byte network-order (big-endian) version header to encrypted data */
 bytea *
 add_header_to_encrpt_data(bytea *encrypted_data)
 {
 	bytea	   *result = NULL;
-	short		key_ver = (short) current_key_version;
+	uint16_t	key_ver_net;
 
-	result = (bytea *) palloc(VARSIZE(encrypted_data) + sizeof(short));
+	result = (bytea *) palloc(VARSIZE(encrypted_data) + sizeof(uint16_t));
 
-	/* add key version header to encrypted data */
-	SET_VARSIZE(result, VARSIZE(encrypted_data) + sizeof(short));
-	memcpy(VARDATA(result), &key_ver, sizeof(short));
-	memcpy((VARDATA(result) + sizeof(short)), VARDATA_ANY(encrypted_data),
+	/* add key version header in network byte order for cross-platform compatibility */
+	SET_VARSIZE(result, VARSIZE(encrypted_data) + sizeof(uint16_t));
+	key_ver_net = htons((uint16_t) current_key_version);
+	memcpy(VARDATA(result), &key_ver_net, sizeof(uint16_t));
+	memcpy((VARDATA(result) + sizeof(uint16_t)), VARDATA_ANY(encrypted_data),
 		   VARSIZE_ANY_EXHDR(encrypted_data));
 	return result;
 }
@@ -1097,20 +1099,20 @@ rm_header_frm_encrpt_input(bytea *input_data)
 	bytea	   *encrypted_data = NULL;
 	int			payload_len;
 
-	if (VARSIZE_ANY_EXHDR(input_data) <= (int) sizeof(short))
+	if (VARSIZE_ANY_EXHDR(input_data) <= (int) sizeof(uint16_t))
 	{
 		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
 						errmsg("encrypted value is malformed: missing ciphertext payload")));
 	}
 
-	payload_len = VARSIZE_ANY_EXHDR(input_data) - sizeof(short);
+	payload_len = VARSIZE_ANY_EXHDR(input_data) - sizeof(uint16_t);
 
 	/* remove version from input data */
 	encrypted_data = (bytea *) palloc(
 									  payload_len + VARHDRSZ);
 	SET_VARSIZE(encrypted_data,
 				payload_len + VARHDRSZ);
-	memcpy(VARDATA(encrypted_data), (VARDATA_ANY(input_data) + sizeof(short)),
+	memcpy(VARDATA(encrypted_data), (VARDATA_ANY(input_data) + sizeof(uint16_t)),
 		   payload_len);
 	return encrypted_data;
 }
@@ -1118,22 +1120,24 @@ rm_header_frm_encrpt_input(bytea *input_data)
 int
 extract_key_version(bytea *input_data)
 {
-	short		key_ver;
+	uint16_t	key_ver_net;
+	int			key_ver;
 
-	if (VARSIZE_ANY_EXHDR(input_data) < (int) sizeof(short))
+	if (VARSIZE_ANY_EXHDR(input_data) < (int) sizeof(uint16_t))
 	{
 		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
 						errmsg("encrypted value is malformed: missing key version header")));
 	}
 
-	memcpy(&key_ver, VARDATA_ANY(input_data), sizeof(short));
+	memcpy(&key_ver_net, VARDATA_ANY(input_data), sizeof(uint16_t));
+	key_ver = (int) ntohs(key_ver_net);
 	if (key_ver <= 0)
 	{
 		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
 						errmsg("encrypted value uses an invalid key version")));
 	}
 
-	return (int) key_ver;
+	return key_ver;
 }
 
 bytea *

@@ -259,6 +259,8 @@ This is also expected — an incorrect passphrase is rejected.
 | `column_encrypt_blind_index_text(plaintext text, blind_index_key text)` | `text` | Returns a SHA-256 HMAC blind index for companion lookup columns. |
 | `column_encrypt_blind_index_bytea(plaintext bytea, blind_index_key text)` | `text` | Returns a SHA-256 HMAC blind index for binary payloads. |
 | `cipher_key_logical_replication_check(schema text, table text)` | `setof record` | Returns local readiness checks and warnings for logical replication of encrypted tables. |
+| `cipher_key_check_expired()` | `setof record` | Returns all non-revoked keys that have passed their expiration time. |
+| `cipher_key_audit_log_view(limit integer, key_version integer)` | `setof record` | Returns recent audit log entries for key management operations. |
 
 ---
 
@@ -408,6 +410,28 @@ Currently validated algorithm:
 | AES (Advanced Encryption Standard) | `aes` |
 
 > **Note:** The `register_cipher_key()` function validates that the algorithm is `aes`. The DEK is always wrapped using AES-256/S2K regardless of the column encryption algorithm.
+
+---
+
+## Error Codes
+
+| Code | Message | Cause |
+|---|---|---|
+| `EDB-ENC0002` | new cipher key is invalid | DEK is NULL or empty |
+| `EDB-ENC0003` | invalid cipher algorithm | Algorithm is not `aes` |
+| `EDB-ENC0012` | cipher key is not correct | Master passphrase failed to decrypt wrapped key |
+| `EDB-ENC0037` | master passphrase is invalid | Master passphrase is NULL or empty |
+| `EDB-ENC0041` | invalid schema/table/column name | Re-encryption target name contains invalid characters |
+| `EDB-ENC0042` | column not found | Re-encryption target column does not exist |
+| `EDB-ENC0043` | key version must be a positive integer | Key version is NULL, zero, or negative |
+| `EDB-ENC0044` | key version is already registered | Attempted to register duplicate key version |
+| `EDB-ENC0045` | more than one active key exists | Multiple keys have `active` state (integrity error) |
+| `EDB-ENC0046` | column is not an encrypted column | Re-encryption target is not `encrypted_text` or `encrypted_bytea` |
+| `EDB-ENC0047` | batch size must be a positive integer | Batch re-encryption size is invalid |
+| `EDB-ENC0048` | encrypt.enable must be on | Re-encryption attempted with encryption disabled |
+| `EDB-ENC0049` | cipher key must be at least 16 bytes | DEK is too short for cryptographic strength |
+| `EDB-ENC0050` | expiration time must be in the future | Key expiration timestamp is in the past |
+| `EDB-ENC0051` | cannot activate expired key | Attempted to activate a key past its expiration |
 
 ---
 

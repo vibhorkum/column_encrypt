@@ -316,13 +316,38 @@ CREATE TABLE cipher_key_table (
     key_state text NOT NULL DEFAULT 'pending'
         CHECK (key_state IN ('pending', 'active', 'retired', 'revoked')),
     created_at timestamptz NOT NULL DEFAULT now(),
-    state_changed_at timestamptz NOT NULL DEFAULT now()
+    state_changed_at timestamptz NOT NULL DEFAULT now(),
+    expires_at timestamptz DEFAULT NULL,
+    description text DEFAULT NULL
 );
 
 CREATE INDEX cipher_key_table_algo_idx ON cipher_key_table(algorithm);
 CREATE UNIQUE INDEX cipher_key_table_single_active_idx
     ON cipher_key_table ((1))
     WHERE key_state = 'active';
+
+/*
+ * Audit log table for key management operations
+ */
+CREATE TABLE cipher_key_audit_log (
+    id bigserial PRIMARY KEY,
+    operation text NOT NULL,
+    key_version integer,
+    performed_by name NOT NULL DEFAULT current_user,
+    performed_at timestamptz NOT NULL DEFAULT now(),
+    details jsonb DEFAULT NULL
+);
+
+CREATE INDEX cipher_key_audit_log_key_version_idx ON cipher_key_audit_log(key_version);
+CREATE INDEX cipher_key_audit_log_performed_at_idx ON cipher_key_audit_log(performed_at);
+
+REVOKE ALL ON TABLE cipher_key_audit_log FROM PUBLIC;
+ALTER TABLE cipher_key_audit_log ENABLE ROW LEVEL SECURITY;
+CREATE POLICY cipher_key_audit_log_superuser_only ON cipher_key_audit_log
+    FOR ALL
+    TO PUBLIC
+    USING (false)
+    WITH CHECK (false);
 
 /* Restrict access to cipher_key_table: only superusers can read it */
 REVOKE ALL ON TABLE cipher_key_table FROM PUBLIC;
@@ -411,24 +436,29 @@ $$;
 -- Args: cipher_key, cipher_algorithm, master_passphrase (Key Encryption Key), key_version, make_active
 --
 
-CREATE FUNCTION register_cipher_key(text, text, text, integer, boolean) RETURNS integer
+CREATE FUNCTION register_cipher_key(
+    cipher_key text,
+    cipher_algorithm text,
+    master_passphrase text,
+    p_key_version integer,
+    p_make_active boolean,
+    p_expires_at timestamptz DEFAULT NULL,
+    p_description text DEFAULT NULL
+) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO public
-    AS $_$
-
-DECLARE
-	cipher_key  ALIAS FOR $1;
-	cipher_algorithm ALIAS FOR $2;
-	master_passphrase ALIAS FOR $3;
-    p_key_version ALIAS FOR $4;
-    p_make_active ALIAS FOR $5;
-
+    AS $$
 BEGIN
 	/* mask pg_stat_activity's query */
 	PERFORM pgstat_actv_mask();
 
 	IF cipher_key IS NULL OR cipher_key = '' THEN
 		RAISE EXCEPTION 'EDB-ENC0002 new cipher key is invalid';
+	END IF;
+
+	/* DEK must be at least 16 bytes for AES-128 security */
+	IF length(cipher_key) < 16 THEN
+		RAISE EXCEPTION 'EDB-ENC0049 cipher key must be at least 16 bytes for cryptographic strength';
 	END IF;
 
 	IF master_passphrase IS NULL OR master_passphrase = '' THEN
@@ -442,6 +472,11 @@ BEGIN
 
     IF p_key_version IS NULL OR p_key_version <= 0 THEN
         RAISE EXCEPTION 'EDB-ENC0043 key version must be a positive integer';
+    END IF;
+
+    /* validate expiration is in the future if provided */
+    IF p_expires_at IS NOT NULL AND p_expires_at <= now() THEN
+        RAISE EXCEPTION 'EDB-ENC0050 expiration time must be in the future';
     END IF;
 
     LOCK TABLE cipher_key_table IN EXCLUSIVE MODE;
@@ -461,15 +496,40 @@ BEGIN
          WHERE key_state = 'active';
     END IF;
 
-	INSERT INTO cipher_key_table(key_version, wrapped_key, algorithm, key_state, state_changed_at)
+	INSERT INTO cipher_key_table(key_version, wrapped_key, algorithm, key_state, state_changed_at, expires_at, description)
 	VALUES(
         p_key_version,
         pgp_sym_encrypt(cipher_key, master_passphrase, 'cipher-algo=aes256, s2k-mode=3'),
         cipher_algorithm,
         CASE WHEN p_make_active THEN 'active' ELSE 'pending' END,
-        now()
+        now(),
+        p_expires_at,
+        p_description
     );
+
+    /* Log the operation */
+    INSERT INTO cipher_key_audit_log(operation, key_version, details)
+    VALUES(
+        'register',
+        p_key_version,
+        jsonb_build_object(
+            'make_active', p_make_active,
+            'expires_at', p_expires_at,
+            'description', p_description
+        )
+    );
+
 	RETURN p_key_version;
+END;
+$$;
+
+/* Backward-compatible 5-argument version */
+CREATE FUNCTION register_cipher_key(text, text, text, integer, boolean) RETURNS integer
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO public
+    AS $_$
+BEGIN
+    RETURN register_cipher_key($1, $2, $3, $4, $5, NULL, NULL);
 END;
 $_$;
 
@@ -665,6 +725,7 @@ CREATE FUNCTION activate_cipher_key(integer) RETURNS boolean
 DECLARE
     requested_version ALIAS FOR $1;
     old_key_version text;
+    old_active_version integer;
 BEGIN
     IF NOT EXISTS (
         SELECT 1
@@ -675,7 +736,23 @@ BEGIN
         RETURN FALSE;
     END IF;
 
+    /* Check if key is expired */
+    IF EXISTS (
+        SELECT 1
+          FROM cipher_key_table
+         WHERE key_version = requested_version
+           AND expires_at IS NOT NULL
+           AND expires_at <= now()
+    ) THEN
+        RAISE EXCEPTION 'EDB-ENC0051 cannot activate expired key version %', requested_version;
+    END IF;
+
     old_key_version := current_setting('encrypt.key_version', true);
+
+    /* Get current active version for audit log */
+    SELECT key_version INTO old_active_version
+      FROM cipher_key_table
+     WHERE key_state = 'active';
 
     BEGIN
         UPDATE cipher_key_table
@@ -691,6 +768,14 @@ BEGIN
          WHERE key_state <> 'revoked';
 
         PERFORM set_config('encrypt.key_version', requested_version::text, false);
+
+        /* Log the operation */
+        INSERT INTO cipher_key_audit_log(operation, key_version, details)
+        VALUES(
+            'activate',
+            requested_version,
+            jsonb_build_object('previous_active_version', old_active_version)
+        );
     EXCEPTION
         WHEN OTHERS THEN
             IF old_key_version IS NOT NULL THEN
@@ -709,11 +794,27 @@ CREATE FUNCTION revoke_cipher_key(integer) RETURNS boolean
     AS $$
 DECLARE
     requested_version ALIAS FOR $1;
+    old_state text;
 BEGIN
+    /* Get current state for audit log */
+    SELECT key_state INTO old_state
+      FROM cipher_key_table
+     WHERE key_version = requested_version;
+
     UPDATE cipher_key_table
        SET key_state = 'revoked',
            state_changed_at = now()
      WHERE key_version = requested_version;
+
+    IF FOUND THEN
+        /* Log the operation */
+        INSERT INTO cipher_key_audit_log(operation, key_version, details)
+        VALUES(
+            'revoke',
+            requested_version,
+            jsonb_build_object('previous_state', old_state)
+        );
+    END IF;
 
     RETURN FOUND;
 END;
@@ -725,14 +826,67 @@ RETURNS TABLE (
     algorithm text,
     key_state text,
     created_at timestamptz,
-    state_changed_at timestamptz
+    state_changed_at timestamptz,
+    expires_at timestamptz,
+    is_expired boolean,
+    description text
 )
     LANGUAGE sql SECURITY DEFINER
     SET search_path TO public
 AS $$
-    SELECT c.key_version, c.algorithm, c.key_state, c.created_at, c.state_changed_at
+    SELECT c.key_version, c.algorithm, c.key_state, c.created_at, c.state_changed_at,
+           c.expires_at,
+           (c.expires_at IS NOT NULL AND c.expires_at <= now()) AS is_expired,
+           c.description
       FROM cipher_key_table AS c
      ORDER BY c.key_version;
+$$;
+
+/*
+ * Function to check for and report expired keys
+ */
+CREATE FUNCTION cipher_key_check_expired()
+RETURNS TABLE (
+    key_version integer,
+    key_state text,
+    expires_at timestamptz,
+    expired_since interval
+)
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO public
+AS $$
+    SELECT c.key_version, c.key_state, c.expires_at,
+           (now() - c.expires_at) AS expired_since
+      FROM cipher_key_table AS c
+     WHERE c.expires_at IS NOT NULL
+       AND c.expires_at <= now()
+       AND c.key_state NOT IN ('revoked')
+     ORDER BY c.expires_at;
+$$;
+
+/*
+ * Function to view audit log (for admins)
+ */
+CREATE FUNCTION cipher_key_audit_log_view(
+    p_limit integer DEFAULT 100,
+    p_key_version integer DEFAULT NULL
+)
+RETURNS TABLE (
+    id bigint,
+    operation text,
+    key_version integer,
+    performed_by name,
+    performed_at timestamptz,
+    details jsonb
+)
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO public
+AS $$
+    SELECT l.id, l.operation, l.key_version, l.performed_by, l.performed_at, l.details
+      FROM cipher_key_audit_log AS l
+     WHERE (p_key_version IS NULL OR l.key_version = p_key_version)
+     ORDER BY l.performed_at DESC
+     LIMIT p_limit;
 $$;
 
 CREATE FUNCTION column_encrypt_blind_index_text(text, text) RETURNS text
@@ -787,6 +941,7 @@ BEGIN
     /* Mask pg_stat_activity */
     PERFORM pgstat_actv_mask();
 
+    /* Encryption must be enabled for re-encryption to work */
     IF current_setting('encrypt.enable') <> 'on' THEN
         RAISE EXCEPTION 'EDB-ENC0048 encrypt.enable must be on for data re-encryption';
     END IF;
@@ -1021,6 +1176,9 @@ REVOKE EXECUTE ON FUNCTION cipher_key_disable_log() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION cipher_key_enable_log() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION register_cipher_key(text, text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION register_cipher_key(text, text, text, integer, boolean) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION register_cipher_key(text, text, text, integer, boolean, timestamptz, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION cipher_key_check_expired() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION cipher_key_audit_log_view(integer, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION load_key(text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION load_key_by_version(text, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION rm_key_details() FROM PUBLIC;
@@ -1046,6 +1204,9 @@ GRANT EXECUTE ON FUNCTION cipher_key_disable_log() TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION cipher_key_enable_log() TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION register_cipher_key(text, text, text) TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION register_cipher_key(text, text, text, integer, boolean) TO column_encrypt_admin;
+GRANT EXECUTE ON FUNCTION register_cipher_key(text, text, text, integer, boolean, timestamptz, text) TO column_encrypt_admin;
+GRANT EXECUTE ON FUNCTION cipher_key_check_expired() TO column_encrypt_admin;
+GRANT EXECUTE ON FUNCTION cipher_key_audit_log_view(integer, integer) TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION activate_cipher_key(integer) TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION revoke_cipher_key(integer) TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION cipher_key_reencrypt_data(text, text, text) TO column_encrypt_admin;
@@ -1074,3 +1235,5 @@ GRANT EXECUTE ON FUNCTION loaded_cipher_key_versions() TO column_encrypt_runtime
 
 GRANT EXECUTE ON FUNCTION cipher_key_versions() TO column_encrypt_reader;
 GRANT EXECUTE ON FUNCTION cipher_key_logical_replication_check(text, text) TO column_encrypt_reader;
+GRANT EXECUTE ON FUNCTION cipher_key_check_expired() TO column_encrypt_reader;
+GRANT EXECUTE ON FUNCTION cipher_key_audit_log_view(integer, integer) TO column_encrypt_reader;

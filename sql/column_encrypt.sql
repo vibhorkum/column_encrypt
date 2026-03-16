@@ -252,4 +252,72 @@ DROP TABLE test_batch_rotate;
 DROP TABLE test_off_mode_text;
 DROP TABLE test_off_mode_bytea;
 
+-- Test: DEK minimum length validation (should fail with short key)
+SET ROLE regress_admin;
+SELECT cipher_key_disable_log();
+DO $$
+BEGIN
+    BEGIN
+        PERFORM register_cipher_key('short', 'aes', 'my-master-passphrase', 99, false);
+        RAISE EXCEPTION 'register_cipher_key unexpectedly succeeded with short key';
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLERRM NOT LIKE 'EDB-ENC0049 %' THEN
+                RAISE;
+            END IF;
+            RAISE NOTICE 'short DEK rejected as expected';
+    END;
+END;
+$$;
+SELECT cipher_key_enable_log();
+RESET ROLE;
+
+-- Test: NULL value handling in encrypted columns
+SET ROLE regress_runtime;
+SELECT load_key('my-master-passphrase');
+RESET ROLE;
+
+CREATE TABLE test_null_handling (id serial, val encrypted_text);
+INSERT INTO test_null_handling(val) VALUES (NULL);
+INSERT INTO test_null_handling(val) VALUES ('not-null');
+SELECT COUNT(*) FROM test_null_handling WHERE val IS NULL;
+SELECT COUNT(*) FROM test_null_handling WHERE val IS NOT NULL;
+DROP TABLE test_null_handling;
+
+-- Test: Equality comparison across same plaintext
+CREATE TABLE test_equality (id serial, val encrypted_text);
+INSERT INTO test_equality(val) VALUES ('same-value');
+INSERT INTO test_equality(val) VALUES ('same-value');
+INSERT INTO test_equality(val) VALUES ('different-value');
+SELECT COUNT(*) FROM test_equality WHERE val = 'same-value'::encrypted_text;
+SELECT COUNT(DISTINCT val) FROM test_equality;
+DROP TABLE test_equality;
+
+-- Test: Hash consistency for encrypted values
+CREATE TABLE test_hash (id serial, val encrypted_text);
+INSERT INTO test_hash(val) VALUES ('hash-test');
+INSERT INTO test_hash(val) VALUES ('hash-test');
+SELECT enc_hash_enctext(val) AS h1, enc_hash_enctext(val) AS h2,
+       enc_hash_enctext(val) = enc_hash_enctext(val) AS same_hash
+FROM test_hash LIMIT 1;
+DROP TABLE test_hash;
+
+-- Test: cipher_key_reencrypt_data with encrypt.enable=off should fail
+SET encrypt.enable = off;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM cipher_key_reencrypt_data('public', 'nonexistent', 'col');
+        RAISE EXCEPTION 'cipher_key_reencrypt_data unexpectedly succeeded with encrypt.enable=off';
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLERRM NOT LIKE 'EDB-ENC0048 %' THEN
+                RAISE;
+            END IF;
+            RAISE NOTICE 'cipher_key_reencrypt_data blocked when encrypt.enable is off';
+    END;
+END;
+$$;
+SET encrypt.enable = on;
+
 SELECT rm_key_details();
