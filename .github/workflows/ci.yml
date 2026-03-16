@@ -131,3 +131,64 @@ jobs:
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
             -c "SELECT has_function_privilege('public', 'load_key(text)', 'EXECUTE');" | grep -Fx 'f'
           pg_ctl -D "$PGDATA" stop
+
+      - name: Verify 3.0 to 3.1 upgrade path
+        if: matrix.pg_version == 14 || matrix.pg_version == 18
+        run: |
+          export PGDATA=$(mktemp -d)
+          export PGPORT=54323
+          export PGHOST=/tmp
+          initdb --no-locale -E UTF8 "$PGDATA"
+          echo "shared_preload_libraries = 'column_encrypt'" >> "$PGDATA/postgresql.conf"
+          echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
+          echo "port = $PGPORT" >> "$PGDATA/postgresql.conf"
+          pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -w start || \
+            (cat "$PGDATA/postgres.log" && exit 1)
+          createdb test_upgrade_31
+          psql -h /tmp -p $PGPORT -d test_upgrade_31 \
+            -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          psql -h /tmp -p $PGPORT -d test_upgrade_31 \
+            -c "CREATE EXTENSION column_encrypt VERSION '3.0';"
+          psql -h /tmp -p $PGPORT -d test_upgrade_31 \
+            -c "ALTER EXTENSION column_encrypt UPDATE TO '3.1';"
+          psql -h /tmp -p $PGPORT -d test_upgrade_31 -At \
+            -c "SELECT extversion FROM pg_extension WHERE extname = 'column_encrypt';" | grep -Fx '3.1'
+          # Verify new 3.1 functions exist
+          psql -h /tmp -p $PGPORT -d test_upgrade_31 -At \
+            -c "SELECT proname FROM pg_proc WHERE proname = 'cipher_encryption_stats';" | grep -Fx 'cipher_encryption_stats'
+          psql -h /tmp -p $PGPORT -d test_upgrade_31 -At \
+            -c "SELECT proname FROM pg_proc WHERE proname = 'cipher_coverage_audit';" | grep -Fx 'cipher_coverage_audit'
+          psql -h /tmp -p $PGPORT -d test_upgrade_31 -At \
+            -c "SELECT proname FROM pg_proc WHERE proname = 'cipher_start_rotation_job';" | grep -Fx 'cipher_start_rotation_job'
+          # Verify rotation jobs table exists
+          psql -h /tmp -p $PGPORT -d test_upgrade_31 -At \
+            -c "SELECT relname FROM pg_class WHERE relname = 'cipher_rotation_jobs';" | grep -Fx 'cipher_rotation_jobs'
+          pg_ctl -D "$PGDATA" stop
+
+      - name: Test production operations features
+        if: matrix.pg_version == 18
+        run: |
+          export PGDATA=$(mktemp -d)
+          export PGPORT=54324
+          export PGHOST=/tmp
+          initdb --no-locale -E UTF8 "$PGDATA"
+          echo "shared_preload_libraries = 'column_encrypt'" >> "$PGDATA/postgresql.conf"
+          echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
+          echo "port = $PGPORT" >> "$PGDATA/postgresql.conf"
+          pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -w start || \
+            (cat "$PGDATA/postgres.log" && exit 1)
+          createdb test_prod_ops
+          psql -h /tmp -p $PGPORT -d test_prod_ops \
+            -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          psql -h /tmp -p $PGPORT -d test_prod_ops \
+            -c "CREATE EXTENSION column_encrypt;"
+          # Test is_key_loaded function
+          psql -h /tmp -p $PGPORT -d test_prod_ops -At \
+            -c "SELECT is_key_loaded();" | grep -Fx 'f'
+          # Test cipher_metrics returns valid JSON
+          psql -h /tmp -p $PGPORT -d test_prod_ops -At \
+            -c "SELECT cipher_metrics()::jsonb IS NOT NULL;"
+          # Test cipher_coverage_summary
+          psql -h /tmp -p $PGPORT -d test_prod_ops -At \
+            -c "SELECT COUNT(*) >= 0 FROM cipher_coverage_summary();"
+          pg_ctl -D "$PGDATA" stop
