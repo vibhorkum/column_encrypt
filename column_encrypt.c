@@ -1273,22 +1273,24 @@ extract_key_version(bytea *input_data)
 bytea *
 decrypt_ciphertext(bytea *input_data)
 {
+	static bool legacy_warning_emitted = false;
 	int			key_version;
 	key_detail  *entry;
+	key_detail  *native_entry = NULL;
 	bytea	   *encrypted_data;
-	bytea	   *plain_data;
+	bytea	   *plain_data = NULL;
+	bool		try_native_fallback = false;
 
 	key_version = extract_key_version(input_data);
 	entry = find_key_detail(key_version);
 
 	/*
-	 * Backward compatibility: if no key found for network byte order version,
-	 * try native byte order (for data written before network byte order was used).
+	 * Precompute native byte order version for backward compatibility.
+	 * Legacy data was written with native byte order before we switched
+	 * to network byte order for cross-platform compatibility.
 	 */
-	if (entry == NULL && VARSIZE_ANY_EXHDR(input_data) >= (int) sizeof(uint16_t))
+	if (VARSIZE_ANY_EXHDR(input_data) >= (int) sizeof(uint16_t))
 	{
-		/* cppcheck-suppress variableScope ; static must persist across calls */
-		static bool legacy_warning_emitted = false;
 		uint16_t	key_ver_raw;
 		int			key_version_native;
 
@@ -1298,20 +1300,63 @@ decrypt_ciphertext(bytea *input_data)
 		if (key_version_native != key_version &&
 			key_version_native > 0 && key_version_native <= 32767)
 		{
-			entry = find_key_detail(key_version_native);
-			if (entry != NULL && !legacy_warning_emitted)
+			native_entry = find_key_detail(key_version_native);
+			try_native_fallback = (native_entry != NULL);
+		}
+	}
+
+	/*
+	 * If no key found for network byte order version, try native byte order
+	 * directly without attempting decryption first.
+	 */
+	if (entry == NULL && native_entry != NULL)
+	{
+		entry = native_entry;
+		try_native_fallback = false;  /* already using native */
+		if (!legacy_warning_emitted)
+		{
+			legacy_warning_emitted = true;
+			ereport(WARNING,
+					(errmsg("decrypting data with legacy native byte order key version; consider re-encrypting data")));
+		}
+	}
+
+	encrypted_data = rm_header_frm_encrpt_input(input_data);
+
+	/*
+	 * Attempt decryption. If it fails and we have a native byte order
+	 * fallback available, try that before giving up.
+	 */
+	if (entry != NULL && try_native_fallback)
+	{
+		PG_TRY();
+		{
+			plain_data = DatumGetByteaPP(pg_col_decrypt(entry, encrypted_data));
+		}
+		PG_CATCH();
+		{
+			/* Clear error state and try native byte order fallback */
+			FlushErrorState();
+
+			/* cppcheck-suppress redundantAssignment ; retry after caught exception */
+			plain_data = DatumGetByteaPP(pg_col_decrypt(native_entry, encrypted_data));
+
+			if (!legacy_warning_emitted)
 			{
 				legacy_warning_emitted = true;
 				ereport(WARNING,
 						(errmsg("decrypting data with legacy native byte order key version; consider re-encrypting data")));
 			}
 		}
+		PG_END_TRY();
+	}
+	else
+	{
+		/* No fallback available; let errors propagate normally */
+		plain_data = DatumGetByteaPP(pg_col_decrypt(entry, encrypted_data));
 	}
 
-	encrypted_data = rm_header_frm_encrpt_input(input_data);
-	plain_data = DatumGetByteaPP(pg_col_decrypt(entry, encrypted_data));
 	pfree(encrypted_data);
-
 	return plain_data;
 }
 
