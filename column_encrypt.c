@@ -1252,6 +1252,7 @@ decrypt_ciphertext(bytea *input_data)
 	 */
 	if (entry == NULL && VARSIZE_ANY_EXHDR(input_data) >= (int) sizeof(uint16_t))
 	{
+		/* cppcheck-suppress variableScope ; static must persist across calls */
 		static bool legacy_warning_emitted = false;
 		uint16_t	key_ver_raw;
 		int			key_version_native;
