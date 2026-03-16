@@ -271,8 +271,8 @@ mask_string_literals(Datum input_text)
 									 mask_literal,
 									 flag);
 
-	pfree((void *) regex_literal);
-	pfree((void *) mask_literal);
+	pfree(DatumGetPointer(regex_literal));
+	pfree(DatumGetPointer(mask_literal));
 
 	/* Step 2: Mask empty-tag dollar-quoted strings ($$...$$) */
 	regex_literal = CStringGetTextDatum("\\$\\$([^$]|\\$[^$])*\\$\\$");
@@ -286,9 +286,9 @@ mask_string_literals(Datum input_text)
 									 mask_literal,
 									 flag);
 
-	pfree((void *) temp);
-	pfree((void *) regex_literal);
-	pfree((void *) mask_literal);
+	pfree(DatumGetPointer(temp));
+	pfree(DatumGetPointer(regex_literal));
+	pfree(DatumGetPointer(mask_literal));
 
 	/* Step 3: Mask tagged dollar-quoted strings ($tag$...$tag$) */
 	regex_literal = CStringGetTextDatum("\\$([A-Za-z_][A-Za-z0-9_]*)\\$([^$]|\\$[^$])*\\$\\1\\$");
@@ -302,10 +302,10 @@ mask_string_literals(Datum input_text)
 									 mask_literal,
 									 flag);
 
-	pfree((void *) temp);
-	pfree((void *) regex_literal);
-	pfree((void *) mask_literal);
-	pfree((void *) flag);
+	pfree(DatumGetPointer(temp));
+	pfree(DatumGetPointer(regex_literal));
+	pfree(DatumGetPointer(mask_literal));
+	pfree(DatumGetPointer(flag));
 
 	return result;
 }
@@ -358,7 +358,7 @@ suppress_keylog_hook(ErrorData *edata)
 													   regex,
 													   mask,
 													   flag);
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 				replaceMsg_tmp = convertedMsg;
 			}
 
@@ -366,7 +366,7 @@ suppress_keylog_hook(ErrorData *edata)
 			if (mask_query_literals)
 			{
 				convertedMsg = mask_string_literals(replaceMsg_tmp);
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 				replaceMsg_tmp = convertedMsg;
 			}
 
@@ -375,7 +375,7 @@ suppress_keylog_hook(ErrorData *edata)
 			MemoryContextSwitchTo(old_mem_context);
 			if (replaceMsg_tmp)
 			{
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 			}
 		}
 
@@ -392,14 +392,14 @@ suppress_keylog_hook(ErrorData *edata)
 													   regex,
 													   mask,
 													   flag);
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 				replaceMsg_tmp = convertedMsg;
 			}
 
 			if (mask_query_literals)
 			{
 				convertedMsg = mask_string_literals(replaceMsg_tmp);
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 				replaceMsg_tmp = convertedMsg;
 			}
 
@@ -409,7 +409,7 @@ suppress_keylog_hook(ErrorData *edata)
 			edata->message = TextDatumGetCString(replaceMsg_tmp);
 			if (replaceMsg_tmp)
 			{
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 			}
 		}
 
@@ -429,7 +429,7 @@ suppress_keylog_hook(ErrorData *edata)
 													   regex,
 													   mask,
 													   flag);
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 
 				/*
 				 * The following must be execute only in extension protocol. But
@@ -442,14 +442,14 @@ suppress_keylog_hook(ErrorData *edata)
 														 regex_param,
 														 mask,
 														 flag);
-				pfree((void *) convertedMsg);
-				pfree((void *) regex_param);
+				pfree(DatumGetPointer(convertedMsg));
+				pfree(DatumGetPointer(regex_param));
 			}
 
 			if (mask_query_literals)
 			{
 				convertedMsg = mask_string_literals(replaceMsg_tmp);
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 				replaceMsg_tmp = convertedMsg;
 			}
 
@@ -459,7 +459,7 @@ suppress_keylog_hook(ErrorData *edata)
 			edata->detail = TextDatumGetCString(replaceMsg_tmp);
 			if (replaceMsg_tmp)
 			{
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 			}
 		}
 
@@ -479,14 +479,14 @@ suppress_keylog_hook(ErrorData *edata)
 													   regex,
 													   mask,
 													   flag);
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 				replaceMsg_tmp = convertedMsg;
 			}
 
 			if (mask_query_literals)
 			{
 				convertedMsg = mask_string_literals(replaceMsg_tmp);
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 				replaceMsg_tmp = convertedMsg;
 			}
 
@@ -496,7 +496,7 @@ suppress_keylog_hook(ErrorData *edata)
 			edata->internalquery = TextDatumGetCString(replaceMsg_tmp);
 			if (replaceMsg_tmp)
 			{
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 			}
 		}
 
@@ -516,14 +516,14 @@ suppress_keylog_hook(ErrorData *edata)
 													   regex,
 													   mask,
 													   flag);
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 				replaceMsg_tmp = convertedMsg;
 			}
 
 			if (mask_query_literals)
 			{
 				convertedMsg = mask_string_literals(replaceMsg_tmp);
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 				replaceMsg_tmp = convertedMsg;
 			}
 
@@ -533,15 +533,15 @@ suppress_keylog_hook(ErrorData *edata)
 			edata->context = TextDatumGetCString(replaceMsg_tmp);
 			if (replaceMsg_tmp)
 			{
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 			}
 		}
 		if (regex)
-			pfree((void *) regex);
+			pfree(DatumGetPointer(regex));
 		if (mask)
-			pfree((void *) mask);
+			pfree(DatumGetPointer(mask));
 		if (flag)
-			pfree((void *) flag);
+			pfree(DatumGetPointer(flag));
 		/* protect from recursive call */
 		being_hook = false;
 	}
@@ -1358,6 +1358,8 @@ decrypt_ciphertext(bytea *input_data)
 {
 	/* cppcheck-suppress variableScope ; static must persist across calls */
 	static bool legacy_warning_emitted = false;
+	/* cppcheck-suppress variableScope ; static must persist across calls */
+	static bool ambiguous_warning_emitted = false;
 	int			version;
 	int			native_ver;
 	bool		is_flagged;
@@ -1429,10 +1431,15 @@ decrypt_ciphertext(bytea *input_data)
 		 * Both keys available - ambiguous legacy data. Prefer network
 		 * interpretation (v3.0 format) but warn about potential mismatch.
 		 * User should re-encrypt data to get unambiguous flagged format.
+		 * Only warn once per session to avoid log spam during rotations.
 		 */
-		ereport(WARNING,
-				(errmsg("legacy ciphertext format is ambiguous (could be version %d or %d); "
-						"re-encrypt data to resolve", version, native_ver)));
+		if (!ambiguous_warning_emitted)
+		{
+			ambiguous_warning_emitted = true;
+			ereport(WARNING,
+					(errmsg("legacy ciphertext format is ambiguous (could be version %d or %d); "
+							"re-encrypt data to resolve", version, native_ver)));
+		}
 		plain_data = DatumGetByteaPP(pg_col_decrypt(entry, encrypted_data));
 	}
 	else if (entry != NULL)
