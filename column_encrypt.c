@@ -1137,6 +1137,7 @@ pg_col_encrypt(bytea *input_data)
 		ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
 						errmsg("cannot encrypt data, because key version %d was not loaded",
 							   current_key_version)));
+		return NULL;  /* unreachable, but satisfies static analyzers */
 	}
 	encrypted_data = (bytea *) DatumGetPointer(OidFunctionCall3(
 													pgcrypto_encrypt_oid(),
@@ -1156,6 +1157,7 @@ pg_col_decrypt(key_detail * entry, bytea *encrypted_data)
 	{
 		ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
 						errmsg("cannot decrypt data, because no key was loaded for the ciphertext version")));
+		return (Datum) 0;  /* unreachable, but satisfies static analyzers */
 	}
 	result = OidFunctionCall3(pgcrypto_decrypt_oid(),
 							  PointerGetDatum(encrypted_data),
