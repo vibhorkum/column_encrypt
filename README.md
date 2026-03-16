@@ -263,6 +263,19 @@ This is also expected — an incorrect passphrase is rejected.
 | `cipher_key_logical_replication_check(schema text, table text)` | `setof record` | Returns local readiness checks and warnings for logical replication of encrypted tables. |
 | `cipher_key_check_expired()` | `setof record` | Returns all non-revoked keys that have passed their expiration time. |
 | `cipher_key_audit_log_view(limit integer, key_version integer)` | `setof record` | Returns recent audit log entries for key management operations. |
+| `is_key_loaded()` | `boolean` | Returns true if at least one encryption key is loaded in the session. |
+| `cipher_encryption_stats()` | `setof record` | Returns statistics about all encrypted columns including row counts and key versions in use. |
+| `cipher_key_usage_stats()` | `setof record` | Returns usage statistics for each registered key version. |
+| `cipher_metrics()` | `setof record` | Returns encryption metrics in a format suitable for Prometheus/monitoring systems. |
+| `cipher_coverage_audit(schema text)` | `setof record` | Audits the database for potentially sensitive columns that may need encryption. |
+| `cipher_coverage_summary(schema text)` | `setof record` | Returns a summary of encryption coverage by classification category. |
+| `cipher_start_rotation_job(...)` | `bigint` | Creates a new key rotation job with progress tracking. |
+| `cipher_process_rotation_batch(job_id bigint)` | `bigint` | Processes one batch of rows for a rotation job. |
+| `cipher_run_rotation_job(job_id bigint)` | `bigint` | Runs a rotation job to completion. |
+| `cipher_pause_rotation_job(job_id bigint)` | `boolean` | Pauses a running rotation job. |
+| `cipher_resume_rotation_job(job_id bigint)` | `boolean` | Resumes a paused rotation job. |
+| `cipher_cancel_rotation_job(job_id bigint)` | `boolean` | Cancels a rotation job. |
+| `cipher_rotation_progress()` | `setof record` | Returns current progress of all rotation jobs. |
 
 ---
 
@@ -340,6 +353,115 @@ SELECT cipher_key_enable_log();
 ```
 
 After rotation, all new sessions must call `load_key('my-master-passphrase')` to use the active key version.
+
+### Online Key Rotation with Progress Tracking (v3.1+)
+
+For large tables, use the job-based rotation system that provides progress tracking, pause/resume, and throttling:
+
+```sql
+-- Step 1: Register and load the new key version
+SELECT cipher_key_disable_log();
+SELECT register_cipher_key('new-data-key', 'aes', 'my-master-passphrase', 2, false);
+SELECT load_key_by_version('my-master-passphrase', 1);
+SELECT load_key_by_version('my-master-passphrase', 2);
+SELECT cipher_key_enable_log();
+
+-- Step 2: Start a rotation job with progress tracking
+SET encrypt.key_version = 2;
+SELECT cipher_start_rotation_job(
+    'public',           -- schema
+    'large_table',      -- table
+    'encrypted_col',    -- column
+    2,                  -- target key version
+    5000,               -- batch size
+    50                  -- throttle (ms between batches)
+);
+
+-- Step 3: Monitor progress
+SELECT * FROM cipher_rotation_progress();
+-- job_id | table      | progress | rows_done | total | eta    | status
+-- 1      | large_table| 45%      | 450000    | 1M    | 30 min | running
+
+-- Step 4: Pause during peak hours if needed
+SELECT cipher_pause_rotation_job(1);
+
+-- Step 5: Resume when ready
+SELECT cipher_resume_rotation_job(1);
+
+-- Step 6: Or run to completion in one call
+SELECT cipher_run_rotation_job(1);
+
+-- Step 7: Activate the new key after rotation completes
+SELECT activate_cipher_key(2);
+```
+
+---
+
+## Production Operations (v3.1+)
+
+### Encryption Statistics
+
+View all encrypted columns in your database with their key version distribution:
+
+```sql
+SELECT * FROM cipher_encryption_stats();
+-- schema | table   | column | row_count | key_versions | needs_rotation
+-- public | users   | ssn    | 50000     | {1,2}        | true
+-- public | orders  | card   | 1000000   | {2}          | false
+```
+
+### Key Usage Statistics
+
+See which key versions are in use across the database:
+
+```sql
+SELECT * FROM cipher_key_usage_stats();
+-- key_version | key_state | tables_using | row_count | is_current
+-- 1           | retired   | 2            | 25000     | false
+-- 2           | active    | 5            | 1025000   | true
+```
+
+### Monitoring Metrics
+
+Export metrics for Prometheus/Grafana integration:
+
+```sql
+SELECT * FROM cipher_metrics();
+-- metric_name                       | metric_value | metric_labels
+-- column_encrypt_columns_total      | 12           | {}
+-- column_encrypt_keys_total         | 3            | {"state": "active"}
+-- column_encrypt_keys_expiring_30d  | 1            | {}
+-- column_encrypt_session_key_loaded | 1            | {}
+```
+
+### Encryption Coverage Audit
+
+Discover potentially sensitive columns that should be encrypted:
+
+```sql
+SELECT * FROM cipher_coverage_audit();
+-- schema | table  | column      | classification | encrypted | recommendation
+-- public | users  | ssn         | PII-HIGH       | NO        | ENCRYPT
+-- public | users  | email       | PII-MEDIUM     | NO        | CONSIDER
+-- public | cards  | card_number | PCI            | NO        | ENCRYPT
+-- public | users  | secret_key  | ENCRYPTED      | YES       | OK
+
+-- Get a summary by classification
+SELECT * FROM cipher_coverage_summary();
+-- classification | total | encrypted | unencrypted | coverage_pct
+-- PCI            | 2     | 1         | 1           | 50.0
+-- PII-HIGH       | 3     | 2         | 1           | 66.7
+```
+
+The audit detects columns based on naming patterns:
+- **PII-HIGH**: `ssn`, `social_security`, `tax_id`, `passport`, etc.
+- **PCI**: `card_number`, `credit_card`, `cvv`, `pan`, etc.
+- **SECRET**: `password`, `api_key`, `secret`, `token`, etc.
+- **HIPAA**: `diagnosis`, `prescription`, `medical`, etc.
+- **PII-MEDIUM**: `email`, `phone`, `address`, `dob`, etc.
+- **FINANCIAL**: `salary`, `income`, `bank_account`, etc.
+
+---
 
 ## Logical Replication
 
