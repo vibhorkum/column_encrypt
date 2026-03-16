@@ -6,7 +6,9 @@ DATA = column_encrypt--1.0.sql \
        column_encrypt--1.0--2.0.sql \
        column_encrypt--2.0.sql \
        column_encrypt--2.0--3.0.sql \
-       column_encrypt--3.0.sql
+       column_encrypt--3.0.sql \
+       column_encrypt--3.0--3.1.sql \
+       column_encrypt--3.1.sql
 
  REGRESS = column_encrypt
 
