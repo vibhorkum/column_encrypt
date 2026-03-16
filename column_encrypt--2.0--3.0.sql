@@ -101,6 +101,14 @@ ALTER TABLE public.cipher_key_table
     ADD CONSTRAINT cipher_key_table_key_state_check
     CHECK (key_state IN ('pending', 'active', 'retired', 'revoked'));
 
+/* Add upper bound constraint on key_version to match ciphertext header/GUC limit */
+ALTER TABLE public.cipher_key_table
+    DROP CONSTRAINT IF EXISTS cipher_key_table_key_version_check;
+
+ALTER TABLE public.cipher_key_table
+    ADD CONSTRAINT cipher_key_table_key_version_check
+    CHECK (key_version > 0 AND key_version <= 32767);
+
 CREATE INDEX IF NOT EXISTS cipher_key_table_algo_idx
     ON public.cipher_key_table(algorithm);
 
@@ -230,6 +238,10 @@ BEGIN
 
     IF p_key_version IS NULL OR p_key_version <= 0 THEN
         RAISE EXCEPTION 'EDB-ENC0043 key version must be a positive integer';
+    END IF;
+
+    IF p_key_version > 32767 THEN
+        RAISE EXCEPTION 'EDB-ENC0052 key version must not exceed 32767 (ciphertext header limit)';
     END IF;
 
     /* validate expiration is in the future if provided */

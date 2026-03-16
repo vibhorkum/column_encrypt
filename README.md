@@ -435,6 +435,7 @@ Currently validated algorithm:
 | `EDB-ENC0049` | cipher key must be at least 16 bytes | DEK is too short for cryptographic strength |
 | `EDB-ENC0050` | expiration time must be in the future | Key expiration timestamp is in the past |
 | `EDB-ENC0051` | cannot activate expired key | Attempted to activate a key past its expiration |
+| `EDB-ENC0052` | key version must not exceed 32767 | Key version exceeds ciphertext header limit |
 
 ---
 

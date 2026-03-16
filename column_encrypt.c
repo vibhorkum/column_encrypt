@@ -1252,6 +1252,7 @@ decrypt_ciphertext(bytea *input_data)
 	 */
 	if (entry == NULL && VARSIZE_ANY_EXHDR(input_data) >= (int) sizeof(uint16_t))
 	{
+		static bool legacy_warning_emitted = false;
 		uint16_t	key_ver_raw;
 		int			key_version_native;
 
@@ -1262,11 +1263,11 @@ decrypt_ciphertext(bytea *input_data)
 			key_version_native > 0 && key_version_native <= 32767)
 		{
 			entry = find_key_detail(key_version_native);
-			if (entry != NULL)
+			if (entry != NULL && !legacy_warning_emitted)
 			{
+				legacy_warning_emitted = true;
 				ereport(WARNING,
-						(errmsg("decrypting data with legacy native byte order key version %d; consider re-encrypting data",
-								key_version_native)));
+						(errmsg("decrypting data with legacy native byte order key version; consider re-encrypting data")));
 			}
 		}
 	}

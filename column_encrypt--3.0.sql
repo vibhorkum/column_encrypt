@@ -310,7 +310,7 @@ AS ASSIGNMENT;
  */
 
 CREATE TABLE cipher_key_table (
-    key_version integer PRIMARY KEY CHECK (key_version > 0),
+    key_version integer PRIMARY KEY CHECK (key_version > 0 AND key_version <= 32767),
     wrapped_key bytea NOT NULL,
     algorithm text NOT NULL,
     key_state text NOT NULL DEFAULT 'pending'
@@ -474,6 +474,10 @@ BEGIN
 
     IF p_key_version IS NULL OR p_key_version <= 0 THEN
         RAISE EXCEPTION 'EDB-ENC0043 key version must be a positive integer';
+    END IF;
+
+    IF p_key_version > 32767 THEN
+        RAISE EXCEPTION 'EDB-ENC0052 key version must not exceed 32767 (ciphertext header limit)';
     END IF;
 
     /* validate expiration is in the future if provided */
