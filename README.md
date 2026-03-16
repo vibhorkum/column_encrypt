@@ -163,7 +163,7 @@ After installation, the following GUC parameters are available (see [GUC Paramet
 |---|---|---|
 | `encrypt.enable` | `on` | Enable/disable column encryption (superuser only) |
 | `encrypt.mask_key_log` | `on` | Mask known sensitive key-management calls in PostgreSQL logs (superuser only) |
-| `encrypt.mask_query_literals` | `off` | Mask all string literals in PostgreSQL log messages (superuser only) |
+| `encrypt.mask_query_literals` | `off` | Mask single-quoted string literals in PostgreSQL log messages (superuser only) |
 | `encrypt.key_version` | `1` | Key version written into ciphertext header (superuser only) |
 
 ---
@@ -274,7 +274,7 @@ All parameters require **superuser** (`PGC_SUSET`) to change.
 |---|---|---|---|---|
 | `encrypt.enable` | `bool` | `on` | — | Enables or disables column encryption globally. This is independent from the log masking helper functions. |
 | `encrypt.mask_key_log` | `bool` | `on` | — | When enabled, masks known sensitive key-management function calls, including case-variant and schema-qualified forms, in PostgreSQL log messages as a defense-in-depth control. |
-| `encrypt.mask_query_literals` | `bool` | `off` | — | When enabled, masks all string literals (e.g., `'value'` → `'***'`) in PostgreSQL log messages. Useful for environments where query logs must not contain any sensitive data. |
+| `encrypt.mask_query_literals` | `bool` | `off` | — | When enabled, masks single-quoted string literals (e.g., `'value'` → `'***'`) in PostgreSQL log messages. Note: dollar-quoted strings (`$$text$$`, `$tag$text$tag$`) are not masked. Useful for environments where query logs must not contain sensitive data in standard string literals. |
 | `encrypt.key_version` | `int` | `1` | `1–32767` | Key version number written into the 2-byte ciphertext header. Increment this when rotating keys to track which version encrypted each value. |
 
 ---

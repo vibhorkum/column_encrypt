@@ -126,7 +126,7 @@ static bool encrypt_enable = true;
 /* whether mask mask_query_log query log or not */
 static bool mask_key_log = true;
 
-/* whether to mask all string literals in query logs */
+/* whether to mask single-quoted string literals in query logs */
 static bool mask_query_literals = false;
 
 /* backup of log_min_error_statement value*/
@@ -197,7 +197,7 @@ _PG_init(void)
 							NULL);
 
 	DefineCustomBoolVariable("encrypt.mask_query_literals",
-							 "Mask all string literals in query logs as '***' to prevent data leakage.",
+							 "Mask single-quoted string literals in query logs as '***' (does not cover dollar-quoted strings).",
 							 NULL,
 							 &mask_query_literals,
 							 false,
@@ -234,8 +234,9 @@ _PG_fini(void)
  * @return    nothing
  */
 /*
- * mask_string_literals - Helper to mask all string literals in a text
- * Replaces 'anything' with '***' to prevent sensitive data leakage
+ * mask_string_literals - Helper to mask single-quoted string literals in text
+ * Replaces 'anything' with '***' to prevent sensitive data leakage.
+ * Note: Does not mask dollar-quoted strings ($$text$$, $tag$text$tag$).
  */
 static Datum
 mask_string_literals(Datum input_text)
