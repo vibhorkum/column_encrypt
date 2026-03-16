@@ -1,6 +1,7 @@
 #include <unistd.h>
 
 #include "postgres.h"
+#include "port/pg_bswap.h"
 #include "fmgr.h"
 #include "pgstat.h"
 #include "utils/guc.h"
@@ -14,10 +15,21 @@
 #include "libpq/pqformat.h"
 #include "utils/memutils.h"
 #include "catalog/pg_collation.h"
+#include "utils/array.h"
 
 #ifdef PG_MODULE_MAGIC
 PG_MODULE_MAGIC;
 #endif							/* END PG_MODULE_MAGIC */
+
+/*
+ * Key version header format flag.
+ * Bit 15 (0x8000) is set for the new unambiguous format where the version
+ * is stored in network byte order. When this bit is set, the low 15 bits
+ * contain the version (1-32767). When not set, the header is legacy format
+ * (either old network-order or native-order) and requires fallback logic.
+ */
+#define KEY_VERSION_FLAG_NETWORK	0x8000
+#define KEY_VERSION_MASK			0x7FFF
 
 /*
  * secure_memset - volatile memset to prevent compiler from optimizing away
@@ -64,11 +76,13 @@ pgcrypto_decrypt_oid(void)
 	return oid;
 }
 
-typedef struct
+typedef struct key_detail
 {
+	int			version;		/* ciphertext key version */
 	bytea	   *key;			/* encryption key */
 	text	   *algorithm;		/* encryption algorithm */
-}			key_detail;
+	struct key_detail *next;	/* linked list of loaded keys */
+} key_detail;
 
 
 /* Function declarations */
@@ -80,10 +94,16 @@ Datum		pg_col_decrypt(key_detail * entry, bytea *encrypted_data);
 bytea	   *add_header_to_encrpt_data(bytea *encrypted_data);
 bytea	   *rm_header_frm_encrpt_input(bytea *input_data);
 bool		binary_comparison(bytea *barg1, bytea *barg2);
+int			extract_key_version(bytea *input_data);
+void		extract_key_versions_raw(bytea *input_data, int *version, int *native_ver, bool *is_flagged);
+bytea	   *decrypt_ciphertext(bytea *input_data);
 
-
-key_detail *create_key_detail(text *key, text *algorithm);
+key_detail *create_key_detail(text *key, text *algorithm, int version);
 bool		remove_key_detail(key_detail * entry);
+bool		store_key_detail(text *key, text *algorithm, int version);
+void		remove_all_key_details(void);
+key_detail *find_key_detail(int version);
+key_detail *get_current_key_detail(void);
 bool		is_key_loaded(void);
 
 PG_FUNCTION_INFO_V1(pgstat_actv_mask);
@@ -99,6 +119,9 @@ PG_FUNCTION_INFO_V1(inet_enc_text);
 PG_FUNCTION_INFO_V1(xml_enc_text);
 PG_FUNCTION_INFO_V1(enc_text_regclass);
 PG_FUNCTION_INFO_V1(enc_hash_encrted_data);
+PG_FUNCTION_INFO_V1(enc_key_version_text);
+PG_FUNCTION_INFO_V1(enc_key_version_bytea);
+PG_FUNCTION_INFO_V1(enc_loaded_key_versions);
 PG_FUNCTION_INFO_V1(enc_store_key);
 PG_FUNCTION_INFO_V1(enc_store_prv_key);
 PG_FUNCTION_INFO_V1(enc_rm_key);
@@ -114,6 +137,9 @@ static bool encrypt_enable = true;
 /* whether mask mask_query_log query log or not */
 static bool mask_key_log = true;
 
+/* whether to mask string literals (single-quoted and dollar-quoted) in query logs */
+static bool mask_query_literals = false;
+
 /* backup of log_min_error_statement value*/
 int			backup_log_min_error_statement = -1;
 
@@ -121,10 +147,7 @@ int			backup_log_min_error_statement = -1;
 int			backup_log_min_duration_statement = -1;
 
 /* current encryption key */
-key_detail *current_key_detail = NULL;
-
-/* previous encryption key */
-key_detail *previous_key_detail = NULL;
+static key_detail *loaded_keys = NULL;
 
 /* current key version written into the ciphertext header */
 static int	current_key_version = 1;
@@ -150,7 +173,7 @@ _PG_init(void)
 	emit_log_hook = suppress_keylog_hook;
 
 	DefineCustomBoolVariable("encrypt.mask_key_log",
-							 "mask query log messages, string within () mark will be masked by *****",
+							 "mask known sensitive key-management function calls in log messages",
 							 NULL,
 							 &mask_key_log,
 							 true,
@@ -184,6 +207,17 @@ _PG_init(void)
 							NULL,
 							NULL);
 
+	DefineCustomBoolVariable("encrypt.mask_query_literals",
+							 "Mask string literals (single-quoted and dollar-quoted) in query logs to prevent data leakage.",
+							 NULL,
+							 &mask_query_literals,
+							 false,
+							 PGC_SUSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
 }
 
 
@@ -204,12 +238,78 @@ _PG_fini(void)
 /*
  * Function : suppress_keylog_hook
  * ---------------------
- * Mask query log messages.
- * String in "()" mark will be quoted by *****.
+ * Mask known sensitive key-management function calls in query text and
+ * related log fields.
  *
  * @param    *char ARG[0]        input ErrorData*
  * @return    nothing
  */
+/*
+ * mask_string_literals - Helper to mask string literals in text
+ * Masks single-quoted strings and dollar-quoted strings to prevent
+ * sensitive data leakage in logs.
+ */
+static Datum
+mask_string_literals(Datum input_text)
+{
+	Datum		regex_literal,
+				mask_literal,
+				flag,
+				result,
+				temp;
+
+	flag = CStringGetTextDatum("g");
+
+	/* Step 1: Mask single-quoted strings, handling escaped quotes */
+	regex_literal = CStringGetTextDatum("'([^']*|'')*'");
+	mask_literal = CStringGetTextDatum("'***'");
+
+	result = DirectFunctionCall4Coll(textregexreplace,
+									 C_COLLATION_OID,
+									 input_text,
+									 regex_literal,
+									 mask_literal,
+									 flag);
+
+	pfree(DatumGetPointer(regex_literal));
+	pfree(DatumGetPointer(mask_literal));
+
+	/* Step 2: Mask empty-tag dollar-quoted strings ($$...$$) */
+	regex_literal = CStringGetTextDatum("\\$\\$([^$]|\\$[^$])*\\$\\$");
+	mask_literal = CStringGetTextDatum("$$***$$");
+
+	temp = result;
+	result = DirectFunctionCall4Coll(textregexreplace,
+									 C_COLLATION_OID,
+									 temp,
+									 regex_literal,
+									 mask_literal,
+									 flag);
+
+	pfree(DatumGetPointer(temp));
+	pfree(DatumGetPointer(regex_literal));
+	pfree(DatumGetPointer(mask_literal));
+
+	/* Step 3: Mask tagged dollar-quoted strings ($tag$...$tag$) */
+	regex_literal = CStringGetTextDatum("\\$([A-Za-z_][A-Za-z0-9_]*)\\$([^$]|\\$[^$])*\\$\\1\\$");
+	mask_literal = CStringGetTextDatum("$\\1$***$\\1$");
+
+	temp = result;
+	result = DirectFunctionCall4Coll(textregexreplace,
+									 C_COLLATION_OID,
+									 temp,
+									 regex_literal,
+									 mask_literal,
+									 flag);
+
+	pfree(DatumGetPointer(temp));
+	pfree(DatumGetPointer(regex_literal));
+	pfree(DatumGetPointer(mask_literal));
+	pfree(DatumGetPointer(flag));
+
+	return result;
+}
+
 static void
 suppress_keylog_hook(ErrorData *edata)
 {
@@ -220,24 +320,27 @@ suppress_keylog_hook(ErrorData *edata)
 	 */
 	Datum		convertedMsg,
 				replaceMsg_tmp,
-				regex,
+				regex = 0,
 				regex_param,
-				mask,
-				flag;
+				mask = 0,
+				flag = 0;
 	MemoryContext old_mem_context;
 
-	/* call the old one if exist */
+	/* Let earlier hooks mutate ErrorData first so our masking is the last step. */
 	if (prev_emit_log_hook)
 	{
 		prev_emit_log_hook(edata);
 	}
 
-	if (mask_key_log && !(being_hook))
+	if ((mask_key_log || mask_query_literals) && !(being_hook))
 	{
-		/* Arguments of textregexreplace. */
-		regex = CStringGetTextDatum("[(].+[)]"),
-			mask = CStringGetTextDatum("(*****)"),
-			flag = CStringGetTextDatum("g");
+		/* Only allocate regex/mask/flag when mask_key_log is enabled */
+		if (mask_key_log)
+		{
+			regex = CStringGetTextDatum("((\"?[A-Za-z_][A-Za-z0-9_]*\"?[[:space:]]*\\.[[:space:]]*)*\"?(register_cipher_key|load_key_by_version|load_key|enc_store_key|enc_store_prv_key)\"?[[:space:]]*\\([^\\)]*\\))");
+			mask = CStringGetTextDatum("column_encrypt_sensitive_call(*****)");
+			flag = CStringGetTextDatum("gi");
+		}
 
 		/* protect from recursive call */
 		being_hook = true;
@@ -245,22 +348,34 @@ suppress_keylog_hook(ErrorData *edata)
 		if (debug_query_string)
 		{
 			replaceMsg_tmp = CStringGetTextDatum(debug_query_string);
-			convertedMsg = DirectFunctionCall4Coll(textregexreplace,
-												   C_COLLATION_OID,
-												   replaceMsg_tmp,
-												   regex,
-												   mask,
-												   flag);
+
+			/* First, mask key management function calls if enabled */
+			if (mask_key_log)
+			{
+				convertedMsg = DirectFunctionCall4Coll(textregexreplace,
+													   C_COLLATION_OID,
+													   replaceMsg_tmp,
+													   regex,
+													   mask,
+													   flag);
+				pfree(DatumGetPointer(replaceMsg_tmp));
+				replaceMsg_tmp = convertedMsg;
+			}
+
+			/* Then, mask all string literals if enabled */
+			if (mask_query_literals)
+			{
+				convertedMsg = mask_string_literals(replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
+				replaceMsg_tmp = convertedMsg;
+			}
+
+			old_mem_context = MemoryContextSwitchTo(MessageContext);
+			debug_query_string = TextDatumGetCString(replaceMsg_tmp);
+			MemoryContextSwitchTo(old_mem_context);
 			if (replaceMsg_tmp)
 			{
-				pfree((void *) replaceMsg_tmp);
-			}
-			old_mem_context = MemoryContextSwitchTo(MessageContext);
-			debug_query_string = TextDatumGetCString(convertedMsg);
-			MemoryContextSwitchTo(old_mem_context);
-			if (convertedMsg)
-			{
-				pfree((void *) convertedMsg);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 			}
 		}
 
@@ -268,23 +383,33 @@ suppress_keylog_hook(ErrorData *edata)
 		if (edata->message)
 		{
 			replaceMsg_tmp = CStringGetTextDatum(edata->message);
-			convertedMsg = DirectFunctionCall4Coll(textregexreplace,
-												   C_COLLATION_OID,
-												   replaceMsg_tmp,
-												   regex,
-												   mask,
-												   flag);
-			if (replaceMsg_tmp)
+
+			if (mask_key_log)
 			{
-				pfree((void *) replaceMsg_tmp);
+				convertedMsg = DirectFunctionCall4Coll(textregexreplace,
+													   C_COLLATION_OID,
+													   replaceMsg_tmp,
+													   regex,
+													   mask,
+													   flag);
+				pfree(DatumGetPointer(replaceMsg_tmp));
+				replaceMsg_tmp = convertedMsg;
 			}
+
+			if (mask_query_literals)
+			{
+				convertedMsg = mask_string_literals(replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
+				replaceMsg_tmp = convertedMsg;
+			}
+
 			/* do not leave anything relate to key info in memory */
 			secure_memset(edata->message, 0, strlen(edata->message) + 1);
 			pfree(edata->message);
-			edata->message = TextDatumGetCString(convertedMsg);
-			if (convertedMsg)
+			edata->message = TextDatumGetCString(replaceMsg_tmp);
+			if (replaceMsg_tmp)
 			{
-				pfree((void *) convertedMsg);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 			}
 		}
 
@@ -295,43 +420,46 @@ suppress_keylog_hook(ErrorData *edata)
 		if (edata->detail)
 		{
 			replaceMsg_tmp = CStringGetTextDatum(edata->detail);
-			convertedMsg = DirectFunctionCall4Coll(textregexreplace,
-												   C_COLLATION_OID,
-												   replaceMsg_tmp,
-												   regex,
-												   mask,
-												   flag);
-			if (replaceMsg_tmp)
+
+			if (mask_key_log)
 			{
-				pfree((void *) replaceMsg_tmp);
+				convertedMsg = DirectFunctionCall4Coll(textregexreplace,
+													   C_COLLATION_OID,
+													   replaceMsg_tmp,
+													   regex,
+													   mask,
+													   flag);
+				pfree(DatumGetPointer(replaceMsg_tmp));
+
+				/*
+				 * The following must be execute only in extension protocol. But
+				 * can not judge whether extension protocol or not
+				 */
+				regex_param = CStringGetTextDatum("parameters: .+");
+				replaceMsg_tmp = DirectFunctionCall4Coll(textregexreplace,
+														 C_COLLATION_OID,
+														 convertedMsg,
+														 regex_param,
+														 mask,
+														 flag);
+				pfree(DatumGetPointer(convertedMsg));
+				pfree(DatumGetPointer(regex_param));
 			}
 
-			/*
-			 * The following must be execute only in extension protocol. But
-			 * can not judge whether extension protocol or not
-			 */
-			regex_param = CStringGetTextDatum("parameters: .+");
-			replaceMsg_tmp = DirectFunctionCall4Coll(textregexreplace,
-													 C_COLLATION_OID,
-													 convertedMsg,
-													 regex_param,
-													 mask,
-													 flag);
-			if (convertedMsg)
+			if (mask_query_literals)
 			{
-				pfree((void *) convertedMsg);
+				convertedMsg = mask_string_literals(replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
+				replaceMsg_tmp = convertedMsg;
 			}
-			if (regex_param)
-			{
-				pfree((void *) regex_param);
-			}
+
 			/* do not leave anything relate to key info in memory */
 			secure_memset(edata->detail, 0, strlen(edata->detail) + 1);
 			pfree(edata->detail);
 			edata->detail = TextDatumGetCString(replaceMsg_tmp);
 			if (replaceMsg_tmp)
 			{
-				pfree((void *) replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 			}
 		}
 
@@ -342,23 +470,33 @@ suppress_keylog_hook(ErrorData *edata)
 		if (edata->internalquery)
 		{
 			replaceMsg_tmp = CStringGetTextDatum(edata->internalquery);
-			convertedMsg = DirectFunctionCall4Coll(textregexreplace,
-												   C_COLLATION_OID,
-												   replaceMsg_tmp,
-												   regex,
-												   mask,
-												   flag);
-			if (replaceMsg_tmp)
+
+			if (mask_key_log)
 			{
-				pfree((void *) replaceMsg_tmp);
+				convertedMsg = DirectFunctionCall4Coll(textregexreplace,
+													   C_COLLATION_OID,
+													   replaceMsg_tmp,
+													   regex,
+													   mask,
+													   flag);
+				pfree(DatumGetPointer(replaceMsg_tmp));
+				replaceMsg_tmp = convertedMsg;
 			}
+
+			if (mask_query_literals)
+			{
+				convertedMsg = mask_string_literals(replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
+				replaceMsg_tmp = convertedMsg;
+			}
+
 			/* do not leave anything relate to key info in memory */
 			secure_memset(edata->internalquery, 0, strlen(edata->internalquery) + 1);
 			pfree(edata->internalquery);
-			edata->internalquery = TextDatumGetCString(convertedMsg);
-			if (convertedMsg)
+			edata->internalquery = TextDatumGetCString(replaceMsg_tmp);
+			if (replaceMsg_tmp)
 			{
-				pfree((void *) convertedMsg);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 			}
 		}
 
@@ -369,31 +507,41 @@ suppress_keylog_hook(ErrorData *edata)
 		if (edata->context)
 		{
 			replaceMsg_tmp = CStringGetTextDatum(edata->context);
-			convertedMsg = DirectFunctionCall4Coll(textregexreplace,
-												   C_COLLATION_OID,
-												   replaceMsg_tmp,
-												   regex,
-												   mask,
-												   flag);
-			if (replaceMsg_tmp)
+
+			if (mask_key_log)
 			{
-				pfree((void *) replaceMsg_tmp);
+				convertedMsg = DirectFunctionCall4Coll(textregexreplace,
+													   C_COLLATION_OID,
+													   replaceMsg_tmp,
+													   regex,
+													   mask,
+													   flag);
+				pfree(DatumGetPointer(replaceMsg_tmp));
+				replaceMsg_tmp = convertedMsg;
 			}
+
+			if (mask_query_literals)
+			{
+				convertedMsg = mask_string_literals(replaceMsg_tmp);
+				pfree(DatumGetPointer(replaceMsg_tmp));
+				replaceMsg_tmp = convertedMsg;
+			}
+
 			/* do not leave anything relate to key info in memory */
 			secure_memset(edata->context, 0, strlen(edata->context) + 1);
 			pfree(edata->context);
-			edata->context = TextDatumGetCString(convertedMsg);
-			if (convertedMsg)
+			edata->context = TextDatumGetCString(replaceMsg_tmp);
+			if (replaceMsg_tmp)
 			{
-				pfree((void *) convertedMsg);
+				pfree(DatumGetPointer(replaceMsg_tmp));
 			}
 		}
 		if (regex)
-			pfree((void *) regex);
+			pfree(DatumGetPointer(regex));
 		if (mask)
-			pfree((void *) mask);
+			pfree(DatumGetPointer(mask));
 		if (flag)
-			pfree((void *) flag);
+			pfree(DatumGetPointer(flag));
 		/* protect from recursive call */
 		being_hook = false;
 	}
@@ -471,32 +619,15 @@ col_enc_text_out(PG_FUNCTION_ARGS)
 {
 	bytea	   *input_data = PG_GETARG_BYTEA_PP(0); /* pointer of input
 													 * ciphertext  */
-	bytea	   *encrypted_data = NULL;	/* remove header of ciphertext */
-	key_detail *entry = NULL;	/* key */
 	Datum		result;
-	Datum		tmp_result;
+	bytea	   *plain_data = NULL;
 
 	/* if encrypt_enable is true, decrypt input data and return */
 	if (encrypt_enable)
 	{
-		/* if old key is exists, re-encryption is working now */
-		if (previous_key_detail != NULL)
-		{
-			entry = previous_key_detail;
-		}
-		else
-		{
-			entry = current_key_detail;
-		}
-
-		/* remove header from input data */
-		encrypted_data = rm_header_frm_encrpt_input(input_data);
-		/* decrypting ciphertext */
-		tmp_result = pg_col_decrypt(entry, encrypted_data);
-		result = DirectFunctionCall1(textout, tmp_result);
-
-		pfree(encrypted_data);
-		pfree(DatumGetPointer(tmp_result));
+		plain_data = decrypt_ciphertext(input_data);
+		result = DirectFunctionCall1(textout, PointerGetDatum(plain_data));
+		pfree(plain_data);
 	}
 	/* if encrypt_enable is false return ciphertext */
 	else
@@ -564,34 +695,15 @@ col_enc_bytea_out(PG_FUNCTION_ARGS)
 {
 	bytea	   *input_data = PG_GETARG_BYTEA_PP(0); /* pointer of input
 													 * ciphertext  */
-
-	bytea	   *encrypted_data = NULL;	/* remove header of ciphertext */
-	key_detail *entry = NULL;	/* key */
 	Datum		result;
-	Datum		tmp_result;
+	bytea	   *plain_data = NULL;
 
 	/* if encrypt_enable is true, decrypt input data and return */
 	if (encrypt_enable)
 	{
-		/* if key is not set print error and exit */
-		if (previous_key_detail != NULL)
-		{
-			entry = previous_key_detail;
-		}
-		else
-		{
-			entry = current_key_detail;
-		}
-
-		/* remove header information from input data */
-		encrypted_data = rm_header_frm_encrpt_input(input_data);
-
-		/* decrypting ciphertext */
-		tmp_result = pg_col_decrypt(entry, encrypted_data);
-		result = DirectFunctionCall1(byteaout, tmp_result);
-
-		pfree(encrypted_data);
-		pfree(DatumGetPointer(tmp_result));
+		plain_data = decrypt_ciphertext(input_data);
+		result = DirectFunctionCall1(byteaout, PointerGetDatum(plain_data));
+		pfree(plain_data);
 	}
 	/* if encrypt_enable is false return ciphertext */
 	else
@@ -618,7 +730,22 @@ col_enc_comp_eq_text(PG_FUNCTION_ARGS)
 {
 	bytea	   *barg1 = PG_GETARG_BYTEA_PP(0);
 	bytea	   *barg2 = PG_GETARG_BYTEA_PP(1);
-	bool		result = binary_comparison(barg1, barg2);
+	bytea	   *plain1 = NULL;
+	bytea	   *plain2 = NULL;
+	bool		result;
+
+	if (encrypt_enable)
+	{
+		plain1 = decrypt_ciphertext(barg1);
+		plain2 = decrypt_ciphertext(barg2);
+		result = binary_comparison(plain1, plain2);
+		pfree(plain1);
+		pfree(plain2);
+	}
+	else
+	{
+		result = binary_comparison(barg1, barg2);
+	}
 
 	PG_FREE_IF_COPY(barg1, 0);
 	PG_FREE_IF_COPY(barg2, 1);
@@ -642,7 +769,22 @@ col_enc_comp_eq_bytea(PG_FUNCTION_ARGS)
 {
 	bytea	   *barg1 = PG_GETARG_BYTEA_PP(0);
 	bytea	   *barg2 = PG_GETARG_BYTEA_PP(1);
-	bool		result = binary_comparison(barg1, barg2);
+	bytea	   *plain1 = NULL;
+	bytea	   *plain2 = NULL;
+	bool		result;
+
+	if (encrypt_enable)
+	{
+		plain1 = decrypt_ciphertext(barg1);
+		plain2 = decrypt_ciphertext(barg2);
+		result = binary_comparison(plain1, plain2);
+		pfree(plain1);
+		pfree(plain2);
+	}
+	else
+	{
+		result = binary_comparison(barg1, barg2);
+	}
 
 	PG_FREE_IF_COPY(barg1, 0);
 	PG_FREE_IF_COPY(barg2, 1);
@@ -744,17 +886,79 @@ enc_text_regclass(PG_FUNCTION_ARGS)
 Datum
 enc_hash_encrted_data(PG_FUNCTION_ARGS)
 {
-	struct varlena *key = PG_GETARG_VARLENA_PP(0);
+	bytea	   *cipher = PG_GETARG_BYTEA_PP(0);
+	bytea	   *plain = NULL;
 
 	Datum		result;
 
-	result = hash_any((unsigned char *) VARDATA_ANY(key),
-					  VARSIZE_ANY_EXHDR(key));
+	if (encrypt_enable)
+	{
+		plain = decrypt_ciphertext(cipher);
+		result = hash_any((unsigned char *) VARDATA_ANY(plain),
+					  VARSIZE_ANY_EXHDR(plain));
+		pfree(plain);
+	}
+	else
+	{
+		result = hash_any((unsigned char *) VARDATA_ANY(cipher),
+					  VARSIZE_ANY_EXHDR(cipher));
+	}
 
-	/* avoiding leaking memory for toasted input */
-	PG_FREE_IF_COPY(key, 0);
+	PG_FREE_IF_COPY(cipher, 0);
 
 	return result;
+}
+
+Datum
+enc_key_version_text(PG_FUNCTION_ARGS)
+{
+	bytea	   *cipher = PG_GETARG_BYTEA_PP(0);
+	int			key_version = extract_key_version(cipher);
+
+	PG_FREE_IF_COPY(cipher, 0);
+	PG_RETURN_INT32(key_version);
+}
+
+Datum
+enc_key_version_bytea(PG_FUNCTION_ARGS)
+{
+	bytea	   *cipher = PG_GETARG_BYTEA_PP(0);
+	int			key_version = extract_key_version(cipher);
+
+	PG_FREE_IF_COPY(cipher, 0);
+	PG_RETURN_INT32(key_version);
+}
+
+Datum
+enc_loaded_key_versions(PG_FUNCTION_ARGS)
+{
+	key_detail  *entry = loaded_keys;
+	Datum	   *values;
+	int			count = 0;
+	int			i = 0;
+	ArrayType  *result;
+
+	while (entry != NULL)
+	{
+		count++;
+		entry = entry->next;
+	}
+
+	if (count == 0)
+		PG_RETURN_ARRAYTYPE_P(construct_empty_array(INT4OID));
+
+	values = (Datum *) palloc(sizeof(Datum) * count);
+	entry = loaded_keys;
+	while (entry != NULL)
+	{
+		values[i++] = Int32GetDatum(entry->version);
+		entry = entry->next;
+	}
+
+	result = construct_array(values, count, INT4OID, sizeof(int32), true, TYPALIGN_INT);
+	pfree(values);
+
+	PG_RETURN_ARRAYTYPE_P(result);
 }
 
 
@@ -768,7 +972,7 @@ enc_hash_encrted_data(PG_FUNCTION_ARGS)
  */
 
 key_detail *
-create_key_detail(text *key, text *algorithm)
+create_key_detail(text *key, text *algorithm, int version)
 {
 	key_detail *entry;
 	MemoryContext old_mem_context;
@@ -776,6 +980,8 @@ create_key_detail(text *key, text *algorithm)
 	/* cipher key must be stored in TopMemoryContext */
 	old_mem_context = MemoryContextSwitchTo(TopMemoryContext);
 	entry = (key_detail *) palloc(sizeof(key_detail));
+	entry->version = version;
+	entry->next = NULL;
 
 	entry->key = (bytea *) palloc(VARSIZE(key));
 	memcpy((char *) entry->key, (char *) key, VARSIZE(key));
@@ -809,12 +1015,79 @@ remove_key_detail(key_detail * entry)
 		}
 		if (entry->algorithm != NULL)
 		{
+			secure_memset(entry->algorithm, 0, VARSIZE(entry->algorithm));
 			pfree(entry->algorithm);
 		}
 		pfree(entry);
 		return true;
 	}
 	return false;
+}
+
+bool
+store_key_detail(text *key, text *algorithm, int version)
+{
+	key_detail  *entry = loaded_keys;
+	key_detail  *prev = NULL;
+
+	while (entry != NULL)
+	{
+		if (entry->version == version)
+		{
+			key_detail *replacement = create_key_detail(key, algorithm, version);
+
+			replacement->next = entry->next;
+			if (prev == NULL)
+				loaded_keys = replacement;
+			else
+				prev->next = replacement;
+			remove_key_detail(entry);
+			return true;
+		}
+		prev = entry;
+		entry = entry->next;
+	}
+
+	entry = create_key_detail(key, algorithm, version);
+	entry->next = loaded_keys;
+	loaded_keys = entry;
+	return true;
+}
+
+void
+remove_all_key_details(void)
+{
+	key_detail  *entry = loaded_keys;
+
+	while (entry != NULL)
+	{
+		key_detail  *next = entry->next;
+
+		remove_key_detail(entry);
+		entry = next;
+	}
+	loaded_keys = NULL;
+}
+
+key_detail *
+find_key_detail(int version)
+{
+	key_detail  *entry = loaded_keys;
+
+	while (entry != NULL)
+	{
+		if (entry->version == version)
+			return entry;
+		entry = entry->next;
+	}
+
+	return NULL;
+}
+
+key_detail *
+get_current_key_detail(void)
+{
+	return find_key_detail(current_key_version);
 }
 
 /*
@@ -832,21 +1105,19 @@ enc_store_key(PG_FUNCTION_ARGS)
 	text	   *key = PG_GETARG_TEXT_P(0);	/* encryption key */
 	text	   *algorithm = PG_GETARG_TEXT_P(1);	/* encryption algorithm */
 
-	remove_key_detail(current_key_detail);
-	/* set current key information */
-	current_key_detail = create_key_detail(key, algorithm);
-
-	PG_RETURN_BOOL(true);
+	PG_RETURN_BOOL(store_key_detail(key, algorithm, current_key_version));
 }
 
 /*
  * Function : enc_store_prv_key
  * -----------------------------------------
- * regist previous_key_detail
+ * Deprecated compatibility alias for enc_store_key().
+ * Stores the provided key under the current encrypt.key_version;
+ * it no longer writes to a distinct "previous" slot.
  *
- * @param    *text ARG[0]    old encryption key
- * @param    *text ARG[1]    old encryption algorithm
- * @return    address of old key information in variable
+ * @param    *text ARG[0]    encryption key
+ * @param    *text ARG[1]    encryption algorithm
+ * @return   true when the key is stored in the session keyring
  *
  */
 
@@ -857,11 +1128,7 @@ enc_store_prv_key(PG_FUNCTION_ARGS)
 	text	   *key = PG_GETARG_TEXT_P(0);	/* encryption key */
 	text	   *algorithm = PG_GETARG_TEXT_P(1);	/* encryption algorithm */
 
-	remove_key_detail(previous_key_detail);
-	/* set previous key information */
-	previous_key_detail = create_key_detail(key, algorithm);
-
-	PG_RETURN_BOOL(true);
+	PG_RETURN_BOOL(store_key_detail(key, algorithm, current_key_version));
 }
 
 
@@ -873,9 +1140,9 @@ enc_store_prv_key(PG_FUNCTION_ARGS)
 Datum
 enc_rm_key(PG_FUNCTION_ARGS)
 {
-	if (remove_key_detail(current_key_detail))
+	if (loaded_keys != NULL)
 	{
-		current_key_detail = NULL;
+		remove_all_key_details();
 		PG_RETURN_BOOL(true);
 	}
 	PG_RETURN_BOOL(false);
@@ -892,12 +1159,7 @@ enc_rm_key(PG_FUNCTION_ARGS)
 Datum
 enc_rm_prv_key(PG_FUNCTION_ARGS)
 {
-	if (remove_key_detail(previous_key_detail))
-	{
-		previous_key_detail = NULL;
-		PG_RETURN_BOOL(true);
-	}
-	PG_RETURN_BOOL(false);
+	return enc_rm_key(fcinfo);
 }
 
 
@@ -908,12 +1170,7 @@ enc_rm_prv_key(PG_FUNCTION_ARGS)
 bool
 is_key_loaded()
 {
-	/* if key is not set return false */
-	if (current_key_detail == NULL)
-	{
-		return false;
-	}
-	return true;
+	return loaded_keys != NULL;
 }
 
 
@@ -922,17 +1179,20 @@ bytea *
 pg_col_encrypt(bytea *input_data)
 {
 	bytea	   *encrypted_data;
+	key_detail  *entry = get_current_key_detail();
 
-	if (!is_key_loaded())
+	if (entry == NULL)
 	{
 		ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
-						errmsg("cannot encrypt data, because key was not set")));
+						errmsg("cannot encrypt data, because key version %d was not loaded",
+							   current_key_version)));
+		return NULL;  /* unreachable, but satisfies static analyzers */
 	}
 	encrypted_data = (bytea *) DatumGetPointer(OidFunctionCall3(
 													pgcrypto_encrypt_oid(),
 													PointerGetDatum(input_data),
-													PointerGetDatum(current_key_detail->key),
-													PointerGetDatum(current_key_detail->algorithm)));
+													PointerGetDatum(entry->key),
+													PointerGetDatum(entry->algorithm)));
 	return encrypted_data;
 }
 
@@ -942,10 +1202,11 @@ pg_col_decrypt(key_detail * entry, bytea *encrypted_data)
 {
 	Datum		result;
 
-	if (!is_key_loaded())
+	if (entry == NULL)
 	{
 		ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
-						errmsg("cannot decrypt data, because key was not set")));
+						errmsg("cannot decrypt data, because no key was loaded for the ciphertext version")));
+		return (Datum) 0;  /* unreachable, but satisfies static analyzers */
 	}
 	result = OidFunctionCall3(pgcrypto_decrypt_oid(),
 							  PointerGetDatum(encrypted_data),
@@ -954,19 +1215,24 @@ pg_col_decrypt(key_detail * entry, bytea *encrypted_data)
 	return result;
 }
 
-/* add header to encrypted data */
+/* add 2-byte network-order (big-endian) version header to encrypted data */
 bytea *
 add_header_to_encrpt_data(bytea *encrypted_data)
 {
 	bytea	   *result = NULL;
-	short		key_ver = (short) current_key_version;
+	uint16_t	key_ver_net;
 
-	result = (bytea *) palloc(VARSIZE(encrypted_data) + sizeof(short));
+	result = (bytea *) palloc(VARSIZE(encrypted_data) + sizeof(uint16_t));
 
-	/* add key version header to encrypted data */
-	SET_VARSIZE(result, VARSIZE(encrypted_data) + sizeof(short));
-	memcpy(VARDATA(result), &key_ver, sizeof(short));
-	memcpy((VARDATA(result) + sizeof(short)), VARDATA_ANY(encrypted_data),
+	/*
+	 * Add key version header with network-order flag (bit 15) set.
+	 * This makes new ciphertext unambiguous - the flag indicates the version
+	 * is in network byte order in the low 15 bits.
+	 */
+	SET_VARSIZE(result, VARSIZE(encrypted_data) + sizeof(uint16_t));
+	key_ver_net = pg_hton16((uint16_t) (KEY_VERSION_FLAG_NETWORK | current_key_version));
+	memcpy(VARDATA(result), &key_ver_net, sizeof(uint16_t));
+	memcpy((VARDATA(result) + sizeof(uint16_t)), VARDATA_ANY(encrypted_data),
 		   VARSIZE_ANY_EXHDR(encrypted_data));
 	return result;
 }
@@ -976,15 +1242,229 @@ bytea *
 rm_header_frm_encrpt_input(bytea *input_data)
 {
 	bytea	   *encrypted_data = NULL;
+	int			payload_len;
+
+	if (VARSIZE_ANY_EXHDR(input_data) <= (int) sizeof(uint16_t))
+	{
+		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+						errmsg("encrypted value is malformed: missing ciphertext payload")));
+	}
+
+	payload_len = VARSIZE_ANY_EXHDR(input_data) - sizeof(uint16_t);
 
 	/* remove version from input data */
 	encrypted_data = (bytea *) palloc(
-									  VARSIZE_ANY_EXHDR(input_data) - sizeof(short) + VARHDRSZ);
+									  payload_len + VARHDRSZ);
 	SET_VARSIZE(encrypted_data,
-				VARSIZE_ANY_EXHDR(input_data) - sizeof(short) + VARHDRSZ);
-	memcpy(VARDATA(encrypted_data), (VARDATA_ANY(input_data) + sizeof(short)),
-		   VARSIZE_ANY_EXHDR(input_data) - sizeof(short));
+				payload_len + VARHDRSZ);
+	memcpy(VARDATA(encrypted_data), (VARDATA_ANY(input_data) + sizeof(uint16_t)),
+		   payload_len);
 	return encrypted_data;
+}
+
+/*
+ * Extract key version from ciphertext header, detecting format automatically.
+ *
+ * Returns:
+ *   - is_flagged: true if the new flagged format (unambiguous), false if legacy
+ *   - version: the key version (1-32767), or -1 if invalid
+ *   - native_ver: for legacy format, the native byte order interpretation (-1 if flagged or invalid)
+ *
+ * New format (flagged): High bit set, version in low 15 bits, network byte order.
+ * Legacy format: Either old network-order (v3.0) or native-order (pre-v3.0).
+ */
+void
+extract_key_versions_raw(bytea *input_data, int *version, int *native_ver, bool *is_flagged)
+{
+	uint16_t	key_ver_raw;
+	uint16_t	header_val;
+
+	if (VARSIZE_ANY_EXHDR(input_data) < (int) sizeof(uint16_t))
+	{
+		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+						errmsg("encrypted value is malformed: missing key version header")));
+	}
+
+	memcpy(&key_ver_raw, VARDATA_ANY(input_data), sizeof(uint16_t));
+	header_val = pg_ntoh16(key_ver_raw);
+
+	if (header_val & KEY_VERSION_FLAG_NETWORK)
+	{
+		/*
+		 * New flagged format: high bit indicates network byte order,
+		 * version is in the low 15 bits. This is unambiguous.
+		 */
+		int ver = (int) (header_val & KEY_VERSION_MASK);
+		*is_flagged = true;
+		*version = (ver > 0 && ver <= 32767) ? ver : -1;
+		*native_ver = -1;  /* no fallback needed for flagged format */
+	}
+	else
+	{
+		/*
+		 * Legacy format without flag bit. Could be:
+		 * - v3.0 network byte order (header_val is the version)
+		 * - Pre-v3.0 native byte order (key_ver_raw is the version)
+		 * Return both interpretations for fallback logic.
+		 */
+		int net_ver = (int) header_val;
+		int nat_ver = (int) key_ver_raw;
+
+		*is_flagged = false;
+		*version = (net_ver > 0 && net_ver <= 32767) ? net_ver : -1;
+		*native_ver = (nat_ver > 0 && nat_ver <= 32767 && nat_ver != net_ver) ? nat_ver : -1;
+	}
+}
+
+/*
+ * Extract key version from ciphertext header for user-facing functions.
+ * For flagged format, returns the unambiguous version.
+ * For legacy format, prefers network byte order but falls back to native.
+ */
+int
+extract_key_version(bytea *input_data)
+{
+	int			version;
+	int			native_ver;
+	bool		is_flagged;
+
+	extract_key_versions_raw(input_data, &version, &native_ver, &is_flagged);
+
+	/* Flagged format is unambiguous */
+	if (is_flagged)
+	{
+		if (version > 0)
+			return version;
+		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+						errmsg("encrypted value uses an invalid key version (must be 1-32767)")));
+	}
+
+	/* Legacy format: prefer primary interpretation if valid */
+	if (version > 0)
+		return version;
+
+	/* Fall back to native byte order for legacy data */
+	if (native_ver > 0)
+		return native_ver;
+
+	/* Neither interpretation is valid */
+	ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+					errmsg("encrypted value uses an invalid key version (must be 1-32767)")));
+	return -1;  /* unreachable, but satisfies static analyzers */
+}
+
+bytea *
+decrypt_ciphertext(bytea *input_data)
+{
+	/* cppcheck-suppress variableScope ; static must persist across calls */
+	static bool legacy_warning_emitted = false;
+	/* cppcheck-suppress variableScope ; static must persist across calls */
+	static bool ambiguous_warning_emitted = false;
+	int			version;
+	int			native_ver;
+	bool		is_flagged;
+	key_detail  *entry = NULL;
+	key_detail  *native_entry = NULL;
+	bytea	   *encrypted_data;
+	bytea	   *plain_data;
+
+	extract_key_versions_raw(input_data, &version, &native_ver, &is_flagged);
+
+	if (is_flagged)
+	{
+		/*
+		 * New flagged format: version is unambiguous (high bit indicates
+		 * network byte order). No fallback logic needed.
+		 */
+		if (version <= 0)
+		{
+			ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+							errmsg("encrypted value uses an invalid key version (must be 1-32767)")));
+		}
+
+		entry = find_key_detail(version);
+		if (entry == NULL)
+		{
+			ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
+							errmsg("cannot decrypt data, because no key was loaded for version %d", version)));
+		}
+
+		encrypted_data = rm_header_frm_encrpt_input(input_data);
+		plain_data = DatumGetByteaPP(pg_col_decrypt(entry, encrypted_data));
+		pfree(encrypted_data);
+		return plain_data;
+	}
+
+	/*
+	 * Legacy format (no flag bit): could be v3.0 network-order or pre-v3.0
+	 * native-order. Look up keys for both interpretations.
+	 */
+	if (version > 0)
+		entry = find_key_detail(version);
+	if (native_ver > 0)
+		native_entry = find_key_detail(native_ver);
+
+	encrypted_data = rm_header_frm_encrpt_input(input_data);
+
+	/*
+	 * Decryption strategy for legacy format:
+	 * 1. If only native key available: use it (pre-v3.0 data)
+	 * 2. If only network key available: use it (v3.0 data)
+	 * 3. If both keys available: prefer network interpretation (v3.0 is more
+	 *    recent), but warn about the ambiguity. Re-encrypt data to resolve.
+	 * 4. If neither key available: report error with version info
+	 */
+	if (entry == NULL && native_entry != NULL)
+	{
+		/* Only native key available - definitely pre-v3.0 legacy data */
+		if (!legacy_warning_emitted)
+		{
+			legacy_warning_emitted = true;
+			ereport(WARNING,
+					(errmsg("decrypting data with legacy native byte order key version; consider re-encrypting data")));
+		}
+		plain_data = DatumGetByteaPP(pg_col_decrypt(native_entry, encrypted_data));
+	}
+	else if (entry != NULL && native_entry != NULL)
+	{
+		/*
+		 * Both keys available - ambiguous legacy data. Prefer network
+		 * interpretation (v3.0 format) but warn about potential mismatch.
+		 * User should re-encrypt data to get unambiguous flagged format.
+		 * Only warn once per session to avoid log spam during rotations.
+		 */
+		if (!ambiguous_warning_emitted)
+		{
+			ambiguous_warning_emitted = true;
+			ereport(WARNING,
+					(errmsg("legacy ciphertext format is ambiguous (could be version %d or %d); "
+							"re-encrypt data to resolve", version, native_ver)));
+		}
+		plain_data = DatumGetByteaPP(pg_col_decrypt(entry, encrypted_data));
+	}
+	else if (entry != NULL)
+	{
+		/* Only network key available - v3.0 format data */
+		plain_data = DatumGetByteaPP(pg_col_decrypt(entry, encrypted_data));
+	}
+	else
+	{
+		/* No key available for either interpretation */
+		pfree(encrypted_data);
+		if (version > 0)
+			ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
+							errmsg("cannot decrypt data, because no key was loaded for version %d", version)));
+		else if (native_ver > 0)
+			ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
+							errmsg("cannot decrypt data, because no key was loaded for version %d", native_ver)));
+		else
+			ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
+							errmsg("encrypted value uses an invalid key version (must be 1-32767)")));
+		return NULL;  /* unreachable, but satisfies static analyzers */
+	}
+
+	pfree(encrypted_data);
+	return plain_data;
 }
 
 
@@ -996,35 +1476,10 @@ rm_header_frm_encrpt_input(bytea *input_data)
 Datum
 col_enc_recv(PG_FUNCTION_ARGS)
 {
-	StringInfo	buf = (StringInfo) PG_GETARG_POINTER(0);
-	bytea	   *result;
-	int			nbytes;
-	int32		typmod = -1;
-#ifdef NOT_USED
-	Oid			typelem = InvalidOid;
-#endif
-
-	if (PG_NARGS() > 1)
-	{
-#ifdef NOT_USED
-		typelem = PG_GETARG_OID(1);
-#endif
-		typmod = PG_GETARG_INT32(2);
-	}
-
-	nbytes = buf->len - buf->cursor;
-
-	/* If typmod is -1 (or invalid), or string is greator then typmod */
-	if (typmod != -1 && typmod < nbytes)
-		ereport(ERROR,
-				(errcode(ERRCODE_STRING_DATA_RIGHT_TRUNCATION),
-				 errmsg("value too long for type raw(%d)",
-						(int) typmod)));
-
-	result = (bytea *) palloc(nbytes + VARHDRSZ);
-	SET_VARSIZE(result, nbytes + VARHDRSZ);
-	pq_copymsgbytes(buf, VARDATA(result), nbytes);
-	PG_RETURN_BYTEA_P(result);
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("binary protocol is not supported for encrypted types")));
+	PG_RETURN_NULL();
 }
 
 /*
@@ -1035,9 +1490,10 @@ col_enc_recv(PG_FUNCTION_ARGS)
 Datum
 col_enc_send(PG_FUNCTION_ARGS)
 {
-	bytea	   *vlena = PG_GETARG_BYTEA_P_COPY(0);
-
-	PG_RETURN_BYTEA_P(vlena);
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("binary protocol is not supported for encrypted types")));
+	PG_RETURN_NULL();
 }
 
 

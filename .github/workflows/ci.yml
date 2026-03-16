@@ -10,6 +10,27 @@ permissions:
   contents: read
 
 jobs:
+  static-analysis:
+    name: Static Analysis
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install analysis tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cppcheck
+
+      - name: Run cppcheck on C code
+        run: |
+          cppcheck --enable=warning,style,performance \
+            --suppress=missingIncludeSystem \
+            --error-exitcode=1 \
+            --inline-suppr \
+            column_encrypt.c
+
   build-and-test:
     name: PostgreSQL ${{ matrix.pg_version }}
     runs-on: ubuntu-latest
@@ -64,4 +85,49 @@ jobs:
             -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
           make installcheck PGDATABASE=test_column_encrypt || \
             (cat "$PGDATA/postgres.log" && cat regression.diffs && pg_ctl -D "$PGDATA" stop && exit 1)
+          pg_ctl -D "$PGDATA" stop
+
+      - name: Verify 2.0 to 3.0 upgrade path
+        if: matrix.pg_version == 14 || matrix.pg_version == 18
+        run: |
+          export PGDATA=$(mktemp -d)
+          export PGPORT=54322
+          export PGHOST=/tmp
+          initdb --no-locale -E UTF8 "$PGDATA"
+          echo "shared_preload_libraries = 'column_encrypt'" >> "$PGDATA/postgresql.conf"
+          echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
+          echo "port = $PGPORT" >> "$PGDATA/postgresql.conf"
+          pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -w start || \
+            (cat "$PGDATA/postgres.log" && exit 1)
+          createdb test_column_encrypt_upgrade
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
+            -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
+            -c "CREATE EXTENSION column_encrypt VERSION '2.0';"
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
+            -c "ALTER EXTENSION column_encrypt UPDATE TO '3.0';"
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
+            -c "CREATE ROLE upgrade_admin LOGIN;"
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
+            -c "CREATE ROLE upgrade_runtime LOGIN;"
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
+            -c "CREATE ROLE upgrade_reader LOGIN;"
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
+            -c "GRANT column_encrypt_admin TO upgrade_admin;"
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
+            -c "GRANT column_encrypt_runtime TO upgrade_runtime;"
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
+            -c "GRANT column_encrypt_reader TO upgrade_reader;"
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
+            -c "SELECT extversion FROM pg_extension WHERE extname = 'column_encrypt';" | grep -Fx '3.0'
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
+            -c "SELECT has_function_privilege('upgrade_admin', 'register_cipher_key(text,text,text)', 'EXECUTE');" | grep -Fx 't'
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
+            -c "SELECT has_function_privilege('upgrade_runtime', 'load_key(text)', 'EXECUTE');" | grep -Fx 't'
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
+            -c "SELECT has_function_privilege('upgrade_runtime', 'loaded_cipher_key_versions()', 'EXECUTE');" | grep -Fx 't'
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
+            -c "SELECT has_function_privilege('upgrade_reader', 'cipher_key_versions()', 'EXECUTE');" | grep -Fx 't'
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
+            -c "SELECT has_function_privilege('public', 'load_key(text)', 'EXECUTE');" | grep -Fx 'f'
           pg_ctl -D "$PGDATA" stop

@@ -1,0 +1,30 @@
+services:
+  publisher:
+    image: column-encrypt-publisher:${PG_MAJOR:-18}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        PG_MAJOR: ${PG_MAJOR:-18}
+    command: ["bash", "-lc", "sleep infinity"]
+    environment:
+      PG_MAJOR: ${PG_MAJOR:-18}
+      REPO_DIR: /tmp/column-encrypt-src
+    hostname: publisher
+    volumes:
+      - ..:/workspace:ro
+
+  subscriber:
+    image: column-encrypt-subscriber:${PG_MAJOR:-18}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        PG_MAJOR: ${PG_MAJOR:-18}
+    command: ["bash", "-lc", "sleep infinity"]
+    environment:
+      PG_MAJOR: ${PG_MAJOR:-18}
+      REPO_DIR: /tmp/column-encrypt-src
+    hostname: subscriber
+    volumes:
+      - ..:/workspace:ro

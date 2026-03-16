@@ -1,0 +1,15 @@
+services:
+  regression:
+    image: column-encrypt-regression:${PG_MAJOR:-18}
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        PG_MAJOR: ${PG_MAJOR:-18}
+    environment:
+      PG_MAJOR: ${PG_MAJOR:-18}
+      REPO_DIR: /workspace
+      BUILD_DIR: /tmp/column-encrypt-src
+    working_dir: /workspace
+    volumes:
+      - ..:/workspace:ro
