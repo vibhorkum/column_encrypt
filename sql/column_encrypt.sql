@@ -325,4 +325,23 @@ END;
 $$;
 SET encrypt.enable = on;
 
+-- Test: cipher_verify_column_encryption function
+CREATE TABLE test_verify_enc (id serial, secret encrypted_text);
+INSERT INTO test_verify_enc(secret) VALUES ('verify-test-1'), ('verify-test-2');
+SELECT check_name, status, total_rows, sampled_rows, decryptable_rows, failed_rows
+  FROM cipher_verify_column_encryption('public', 'test_verify_enc', 'secret');
+
+-- Test with invalid column
+SELECT check_name, status
+  FROM cipher_verify_column_encryption('public', 'test_verify_enc', 'nonexistent');
+
+-- Test with non-encrypted column
+SELECT check_name, status
+  FROM cipher_verify_column_encryption('public', 'test_verify_enc', 'id');
+
+DROP TABLE test_verify_enc;
+
+-- Test: cipher_key_versions includes usage statistics
+SELECT key_version, use_count > 0 AS has_usage FROM cipher_key_versions() WHERE key_version = 1;
+
 SELECT rm_key_details();

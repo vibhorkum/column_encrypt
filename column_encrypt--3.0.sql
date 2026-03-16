@@ -318,7 +318,9 @@ CREATE TABLE cipher_key_table (
     created_at timestamptz NOT NULL DEFAULT now(),
     state_changed_at timestamptz NOT NULL DEFAULT now(),
     expires_at timestamptz DEFAULT NULL,
-    description text DEFAULT NULL
+    description text DEFAULT NULL,
+    last_used_at timestamptz DEFAULT NULL,
+    use_count bigint NOT NULL DEFAULT 0
 );
 
 CREATE INDEX cipher_key_table_algo_idx ON cipher_key_table(algorithm);
@@ -606,6 +608,7 @@ DECLARE
 	cipher_key ALIAS FOR $1;
     f_key_num INTEGER;		/* number of active keys */
     old_key_version text;
+    v_key_version integer;
 
 BEGIN
 	/* mask pg_stat_activity's query */
@@ -627,13 +630,21 @@ BEGIN
 		END IF;
 
 			BEGIN
-				PERFORM set_config('encrypt.key_version', key_version::text, false)
-            FROM cipher_key_table
-            WHERE key_state = 'active';
+				SELECT key_version INTO v_key_version
+				  FROM cipher_key_table
+				 WHERE key_state = 'active';
+
+				PERFORM set_config('encrypt.key_version', v_key_version::text, false);
 
 				PERFORM enc_store_key(pgp_sym_decrypt(wrapped_key, cipher_key), algorithm)
 				FROM cipher_key_table
             WHERE key_state = 'active';
+
+				/* Update usage statistics */
+				UPDATE cipher_key_table
+				   SET last_used_at = now(),
+				       use_count = use_count + 1
+				 WHERE key_version = v_key_version;
 			EXCEPTION
 				WHEN OTHERS THEN
 					PERFORM enc_rm_key();
@@ -684,6 +695,13 @@ BEGIN
             END IF;
             RETURN FALSE;
         END IF;
+
+        /* Update usage statistics */
+        UPDATE cipher_key_table
+           SET last_used_at = now(),
+               use_count = use_count + 1
+         WHERE key_version = requested_version;
+
         IF old_key_version IS NOT NULL THEN
             PERFORM set_config('encrypt.key_version', old_key_version, false);
         END IF;
@@ -836,7 +854,9 @@ RETURNS TABLE (
     state_changed_at timestamptz,
     expires_at timestamptz,
     is_expired boolean,
-    description text
+    description text,
+    last_used_at timestamptz,
+    use_count bigint
 )
     LANGUAGE sql SECURITY DEFINER
     SET search_path TO public
@@ -844,7 +864,9 @@ AS $$
     SELECT c.key_version, c.algorithm, c.key_state, c.created_at, c.state_changed_at,
            c.expires_at,
            (c.expires_at IS NOT NULL AND c.expires_at <= now()) AS is_expired,
-           c.description
+           c.description,
+           c.last_used_at,
+           c.use_count
       FROM cipher_key_table AS c
      ORDER BY c.key_version;
 $$;
@@ -1087,6 +1109,145 @@ BEGIN
 END;
 $$;
 
+/*
+ * Function to verify that encrypted data in a column can be decrypted
+ * Returns a table with verification results
+ */
+CREATE FUNCTION cipher_verify_column_encryption(text, text, text, integer DEFAULT 1000)
+RETURNS TABLE (
+    check_name text,
+    status text,
+    total_rows bigint,
+    sampled_rows bigint,
+    decryptable_rows bigint,
+    failed_rows bigint,
+    distinct_key_versions integer[],
+    details text
+)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO public
+AS $_$
+DECLARE
+    p_schema     ALIAS FOR $1;
+    p_table      ALIAS FOR $2;
+    p_column     ALIAS FOR $3;
+    p_sample_size ALIAS FOR $4;
+    v_col_type   text;
+    v_total      bigint;
+    v_sampled    bigint;
+    v_success    bigint;
+    v_failed     bigint;
+    v_versions   integer[];
+    v_sql        text;
+    v_loaded     integer[];
+BEGIN
+    /* Validate the schema/table/column names */
+    IF p_schema !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' OR
+       p_table  !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' OR
+       p_column !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' THEN
+        check_name := 'input_validation';
+        status := 'error';
+        details := 'EDB-ENC0041 invalid schema/table/column name';
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    /* Check column type */
+    SELECT format_type(a.atttypid, a.atttypmod)
+      INTO v_col_type
+      FROM pg_attribute a
+      JOIN pg_class c ON c.oid = a.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = p_schema
+       AND c.relname = p_table
+       AND a.attname = p_column
+       AND a.attnum > 0
+       AND NOT a.attisdropped;
+
+    IF v_col_type IS NULL THEN
+        check_name := 'column_exists';
+        status := 'error';
+        details := format('column %I.%I.%I not found', p_schema, p_table, p_column);
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    IF v_col_type NOT IN ('encrypted_text', 'encrypted_bytea') THEN
+        check_name := 'column_type';
+        status := 'error';
+        details := format('column %I.%I.%I is type %s, not encrypted', p_schema, p_table, p_column, v_col_type);
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    /* Get total row count */
+    EXECUTE format('SELECT count(*) FROM %I.%I WHERE %I IS NOT NULL', p_schema, p_table, p_column)
+       INTO v_total;
+
+    /* Get loaded key versions */
+    v_loaded := loaded_cipher_key_versions();
+
+    IF v_loaded IS NULL OR array_length(v_loaded, 1) IS NULL THEN
+        check_name := 'keys_loaded';
+        status := 'error';
+        total_rows := v_total;
+        details := 'no encryption keys are loaded in the session';
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    /* Get distinct key versions used in the column */
+    EXECUTE format(
+        'SELECT array_agg(DISTINCT enc_key_version(%I)) FROM %I.%I WHERE %I IS NOT NULL',
+        p_column, p_schema, p_table, p_column
+    ) INTO v_versions;
+
+    /* Sample and test decryption */
+    v_success := 0;
+    v_failed := 0;
+
+    /* Count successful decryptions by casting to text (which triggers decryption) */
+    BEGIN
+        EXECUTE format(
+            'SELECT count(*) FROM (
+                SELECT %I::text
+                  FROM %I.%I
+                 WHERE %I IS NOT NULL
+                 LIMIT %s
+             ) sub',
+            p_column, p_schema, p_table, p_column, p_sample_size
+        ) INTO v_success;
+        v_sampled := v_success;
+        v_failed := 0;
+    EXCEPTION
+        WHEN OTHERS THEN
+            /* If bulk decryption fails, try row-by-row */
+            v_sampled := LEAST(v_total, p_sample_size);
+            v_failed := v_sampled;
+            v_success := 0;
+    END;
+
+    check_name := 'decryption_verification';
+    total_rows := v_total;
+    sampled_rows := v_sampled;
+    decryptable_rows := v_success;
+    failed_rows := v_failed;
+    distinct_key_versions := v_versions;
+
+    IF v_failed = 0 THEN
+        status := 'ok';
+        details := format('all %s sampled rows decrypted successfully', v_sampled);
+    ELSE
+        status := 'error';
+        details := format('%s of %s sampled rows failed to decrypt; check if required key versions %s are loaded (currently loaded: %s)',
+                          v_failed, v_sampled, v_versions, v_loaded);
+    END IF;
+
+    RETURN NEXT;
+    RETURN;
+END;
+$_$;
+
 CREATE FUNCTION cipher_key_logical_replication_check(text, text)
 RETURNS TABLE (
     severity text,
@@ -1195,6 +1356,7 @@ REVOKE EXECUTE ON FUNCTION cipher_key_reencrypt_data(text, text, text) FROM PUBL
 REVOKE EXECUTE ON FUNCTION cipher_key_reencrypt_data(text, text, text, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION cipher_key_reencrypt_data_batch(text, text, text, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION cipher_key_logical_replication_check(text, text) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION cipher_verify_column_encryption(text, text, text, integer) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION column_encrypt_blind_index_text(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION column_encrypt_blind_index_bytea(bytea, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION enc_key_version(encrypted_text) FROM PUBLIC;
@@ -1218,6 +1380,7 @@ GRANT EXECUTE ON FUNCTION cipher_key_reencrypt_data(text, text, text) TO column_
 GRANT EXECUTE ON FUNCTION cipher_key_reencrypt_data(text, text, text, integer) TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION cipher_key_reencrypt_data_batch(text, text, text, integer) TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION cipher_key_logical_replication_check(text, text) TO column_encrypt_admin;
+GRANT EXECUTE ON FUNCTION cipher_verify_column_encryption(text, text, text, integer) TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION cipher_key_versions() TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION load_key(text) TO column_encrypt_admin;
 GRANT EXECUTE ON FUNCTION load_key_by_version(text, integer) TO column_encrypt_admin;
@@ -1237,6 +1400,7 @@ GRANT EXECUTE ON FUNCTION column_encrypt_blind_index_bytea(bytea, text) TO colum
 GRANT EXECUTE ON FUNCTION enc_key_version(encrypted_text) TO column_encrypt_runtime;
 GRANT EXECUTE ON FUNCTION enc_key_version(encrypted_bytea) TO column_encrypt_runtime;
 GRANT EXECUTE ON FUNCTION loaded_cipher_key_versions() TO column_encrypt_runtime;
+GRANT EXECUTE ON FUNCTION cipher_verify_column_encryption(text, text, text, integer) TO column_encrypt_runtime;
 
 GRANT EXECUTE ON FUNCTION cipher_key_versions() TO column_encrypt_reader;
 GRANT EXECUTE ON FUNCTION cipher_key_logical_replication_check(text, text) TO column_encrypt_reader;

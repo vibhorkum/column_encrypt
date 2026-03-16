@@ -163,6 +163,7 @@ After installation, the following GUC parameters are available (see [GUC Paramet
 |---|---|---|
 | `encrypt.enable` | `on` | Enable/disable column encryption (superuser only) |
 | `encrypt.mask_key_log` | `on` | Mask known sensitive key-management calls in PostgreSQL logs (superuser only) |
+| `encrypt.mask_query_literals` | `off` | Mask all string literals in PostgreSQL log messages (superuser only) |
 | `encrypt.key_version` | `1` | Key version written into ciphertext header (superuser only) |
 
 ---
@@ -255,7 +256,8 @@ This is also expected — an incorrect passphrase is rejected.
 | `cipher_key_reencrypt_data_batch(schema text, table text, column text, batch_size integer)` | `bigint` | Re-encrypts a bounded batch of rows at a time so callers can rotate large tables incrementally. |
 | `activate_cipher_key(key_version integer)` | `boolean` | Marks one registered key version as active and retires the previously active version. |
 | `revoke_cipher_key(key_version integer)` | `boolean` | Marks a stored key version as revoked so it can no longer be loaded. |
-| `cipher_key_versions()` | `setof record` | Lists registered key versions and their metadata. |
+| `cipher_key_versions()` | `setof record` | Lists registered key versions with metadata including usage statistics (`last_used_at`, `use_count`). |
+| `cipher_verify_column_encryption(schema text, table text, column text, sample_size integer DEFAULT 1000)` | `setof record` | Verifies that data in an encrypted column can be decrypted with currently loaded keys. |
 | `column_encrypt_blind_index_text(plaintext text, blind_index_key text)` | `text` | Returns a SHA-256 HMAC blind index for companion lookup columns. |
 | `column_encrypt_blind_index_bytea(plaintext bytea, blind_index_key text)` | `text` | Returns a SHA-256 HMAC blind index for binary payloads. |
 | `cipher_key_logical_replication_check(schema text, table text)` | `setof record` | Returns local readiness checks and warnings for logical replication of encrypted tables. |
@@ -272,6 +274,7 @@ All parameters require **superuser** (`PGC_SUSET`) to change.
 |---|---|---|---|---|
 | `encrypt.enable` | `bool` | `on` | — | Enables or disables column encryption globally. This is independent from the log masking helper functions. |
 | `encrypt.mask_key_log` | `bool` | `on` | — | When enabled, masks known sensitive key-management function calls, including case-variant and schema-qualified forms, in PostgreSQL log messages as a defense-in-depth control. |
+| `encrypt.mask_query_literals` | `bool` | `off` | — | When enabled, masks all string literals (e.g., `'value'` → `'***'`) in PostgreSQL log messages. Useful for environments where query logs must not contain any sensitive data. |
 | `encrypt.key_version` | `int` | `1` | `1–32767` | Key version number written into the 2-byte ciphertext header. Increment this when rotating keys to track which version encrypted each value. |
 
 ---

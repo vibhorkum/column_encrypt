@@ -126,6 +126,9 @@ static bool encrypt_enable = true;
 /* whether mask mask_query_log query log or not */
 static bool mask_key_log = true;
 
+/* whether to mask all string literals in query logs */
+static bool mask_query_literals = false;
+
 /* backup of log_min_error_statement value*/
 int			backup_log_min_error_statement = -1;
 
@@ -193,6 +196,17 @@ _PG_init(void)
 							NULL,
 							NULL);
 
+	DefineCustomBoolVariable("encrypt.mask_query_literals",
+							 "Mask all string literals in query logs as '***' to prevent data leakage.",
+							 NULL,
+							 &mask_query_literals,
+							 false,
+							 PGC_SUSET,
+							 0,
+							 NULL,
+							 NULL,
+							 NULL);
+
 }
 
 
@@ -219,6 +233,37 @@ _PG_fini(void)
  * @param    *char ARG[0]        input ErrorData*
  * @return    nothing
  */
+/*
+ * mask_string_literals - Helper to mask all string literals in a text
+ * Replaces 'anything' with '***' to prevent sensitive data leakage
+ */
+static Datum
+mask_string_literals(Datum input_text)
+{
+	Datum		regex_literal,
+				mask_literal,
+				flag,
+				result;
+
+	/* Match single-quoted strings, handling escaped quotes */
+	regex_literal = CStringGetTextDatum("'([^']*|'')*'");
+	mask_literal = CStringGetTextDatum("'***'");
+	flag = CStringGetTextDatum("g");
+
+	result = DirectFunctionCall4Coll(textregexreplace,
+									 C_COLLATION_OID,
+									 input_text,
+									 regex_literal,
+									 mask_literal,
+									 flag);
+
+	pfree((void *) regex_literal);
+	pfree((void *) mask_literal);
+	pfree((void *) flag);
+
+	return result;
+}
+
 static void
 suppress_keylog_hook(ErrorData *edata)
 {
@@ -241,9 +286,9 @@ suppress_keylog_hook(ErrorData *edata)
 		prev_emit_log_hook(edata);
 	}
 
-	if (mask_key_log && !(being_hook))
+	if ((mask_key_log || mask_query_literals) && !(being_hook))
 	{
-		/* Arguments of textregexreplace. */
+		/* Arguments of textregexreplace for key management functions */
 		regex = CStringGetTextDatum("((\"?[A-Za-z_][A-Za-z0-9_]*\"?[[:space:]]*\\.[[:space:]]*)*\"?(register_cipher_key|load_key_by_version|load_key|enc_store_key|enc_store_prv_key)\"?[[:space:]]*\\([^\\)]*\\))"),
 			mask = CStringGetTextDatum("column_encrypt_sensitive_call(*****)"),
 			flag = CStringGetTextDatum("gi");
@@ -254,22 +299,34 @@ suppress_keylog_hook(ErrorData *edata)
 		if (debug_query_string)
 		{
 			replaceMsg_tmp = CStringGetTextDatum(debug_query_string);
-			convertedMsg = DirectFunctionCall4Coll(textregexreplace,
-												   C_COLLATION_OID,
-												   replaceMsg_tmp,
-												   regex,
-												   mask,
-												   flag);
+
+			/* First, mask key management function calls if enabled */
+			if (mask_key_log)
+			{
+				convertedMsg = DirectFunctionCall4Coll(textregexreplace,
+													   C_COLLATION_OID,
+													   replaceMsg_tmp,
+													   regex,
+													   mask,
+													   flag);
+				pfree((void *) replaceMsg_tmp);
+				replaceMsg_tmp = convertedMsg;
+			}
+
+			/* Then, mask all string literals if enabled */
+			if (mask_query_literals)
+			{
+				convertedMsg = mask_string_literals(replaceMsg_tmp);
+				pfree((void *) replaceMsg_tmp);
+				replaceMsg_tmp = convertedMsg;
+			}
+
+			old_mem_context = MemoryContextSwitchTo(MessageContext);
+			debug_query_string = TextDatumGetCString(replaceMsg_tmp);
+			MemoryContextSwitchTo(old_mem_context);
 			if (replaceMsg_tmp)
 			{
 				pfree((void *) replaceMsg_tmp);
-			}
-			old_mem_context = MemoryContextSwitchTo(MessageContext);
-			debug_query_string = TextDatumGetCString(convertedMsg);
-			MemoryContextSwitchTo(old_mem_context);
-			if (convertedMsg)
-			{
-				pfree((void *) convertedMsg);
 			}
 		}
 
@@ -277,23 +334,33 @@ suppress_keylog_hook(ErrorData *edata)
 		if (edata->message)
 		{
 			replaceMsg_tmp = CStringGetTextDatum(edata->message);
-			convertedMsg = DirectFunctionCall4Coll(textregexreplace,
-												   C_COLLATION_OID,
-												   replaceMsg_tmp,
-												   regex,
-												   mask,
-												   flag);
-			if (replaceMsg_tmp)
+
+			if (mask_key_log)
 			{
+				convertedMsg = DirectFunctionCall4Coll(textregexreplace,
+													   C_COLLATION_OID,
+													   replaceMsg_tmp,
+													   regex,
+													   mask,
+													   flag);
 				pfree((void *) replaceMsg_tmp);
+				replaceMsg_tmp = convertedMsg;
 			}
+
+			if (mask_query_literals)
+			{
+				convertedMsg = mask_string_literals(replaceMsg_tmp);
+				pfree((void *) replaceMsg_tmp);
+				replaceMsg_tmp = convertedMsg;
+			}
+
 			/* do not leave anything relate to key info in memory */
 			secure_memset(edata->message, 0, strlen(edata->message) + 1);
 			pfree(edata->message);
-			edata->message = TextDatumGetCString(convertedMsg);
-			if (convertedMsg)
+			edata->message = TextDatumGetCString(replaceMsg_tmp);
+			if (replaceMsg_tmp)
 			{
-				pfree((void *) convertedMsg);
+				pfree((void *) replaceMsg_tmp);
 			}
 		}
 
@@ -304,36 +371,39 @@ suppress_keylog_hook(ErrorData *edata)
 		if (edata->detail)
 		{
 			replaceMsg_tmp = CStringGetTextDatum(edata->detail);
-			convertedMsg = DirectFunctionCall4Coll(textregexreplace,
-												   C_COLLATION_OID,
-												   replaceMsg_tmp,
-												   regex,
-												   mask,
-												   flag);
-			if (replaceMsg_tmp)
-			{
-				pfree((void *) replaceMsg_tmp);
-			}
 
-			/*
-			 * The following must be execute only in extension protocol. But
-			 * can not judge whether extension protocol or not
-			 */
-			regex_param = CStringGetTextDatum("parameters: .+");
-			replaceMsg_tmp = DirectFunctionCall4Coll(textregexreplace,
-													 C_COLLATION_OID,
-													 convertedMsg,
-													 regex_param,
-													 mask,
-													 flag);
-			if (convertedMsg)
+			if (mask_key_log)
 			{
+				convertedMsg = DirectFunctionCall4Coll(textregexreplace,
+													   C_COLLATION_OID,
+													   replaceMsg_tmp,
+													   regex,
+													   mask,
+													   flag);
+				pfree((void *) replaceMsg_tmp);
+
+				/*
+				 * The following must be execute only in extension protocol. But
+				 * can not judge whether extension protocol or not
+				 */
+				regex_param = CStringGetTextDatum("parameters: .+");
+				replaceMsg_tmp = DirectFunctionCall4Coll(textregexreplace,
+														 C_COLLATION_OID,
+														 convertedMsg,
+														 regex_param,
+														 mask,
+														 flag);
 				pfree((void *) convertedMsg);
-			}
-			if (regex_param)
-			{
 				pfree((void *) regex_param);
 			}
+
+			if (mask_query_literals)
+			{
+				convertedMsg = mask_string_literals(replaceMsg_tmp);
+				pfree((void *) replaceMsg_tmp);
+				replaceMsg_tmp = convertedMsg;
+			}
+
 			/* do not leave anything relate to key info in memory */
 			secure_memset(edata->detail, 0, strlen(edata->detail) + 1);
 			pfree(edata->detail);
@@ -351,23 +421,33 @@ suppress_keylog_hook(ErrorData *edata)
 		if (edata->internalquery)
 		{
 			replaceMsg_tmp = CStringGetTextDatum(edata->internalquery);
-			convertedMsg = DirectFunctionCall4Coll(textregexreplace,
-												   C_COLLATION_OID,
-												   replaceMsg_tmp,
-												   regex,
-												   mask,
-												   flag);
-			if (replaceMsg_tmp)
+
+			if (mask_key_log)
 			{
+				convertedMsg = DirectFunctionCall4Coll(textregexreplace,
+													   C_COLLATION_OID,
+													   replaceMsg_tmp,
+													   regex,
+													   mask,
+													   flag);
 				pfree((void *) replaceMsg_tmp);
+				replaceMsg_tmp = convertedMsg;
 			}
+
+			if (mask_query_literals)
+			{
+				convertedMsg = mask_string_literals(replaceMsg_tmp);
+				pfree((void *) replaceMsg_tmp);
+				replaceMsg_tmp = convertedMsg;
+			}
+
 			/* do not leave anything relate to key info in memory */
 			secure_memset(edata->internalquery, 0, strlen(edata->internalquery) + 1);
 			pfree(edata->internalquery);
-			edata->internalquery = TextDatumGetCString(convertedMsg);
-			if (convertedMsg)
+			edata->internalquery = TextDatumGetCString(replaceMsg_tmp);
+			if (replaceMsg_tmp)
 			{
-				pfree((void *) convertedMsg);
+				pfree((void *) replaceMsg_tmp);
 			}
 		}
 
@@ -378,23 +458,33 @@ suppress_keylog_hook(ErrorData *edata)
 		if (edata->context)
 		{
 			replaceMsg_tmp = CStringGetTextDatum(edata->context);
-			convertedMsg = DirectFunctionCall4Coll(textregexreplace,
-												   C_COLLATION_OID,
-												   replaceMsg_tmp,
-												   regex,
-												   mask,
-												   flag);
-			if (replaceMsg_tmp)
+
+			if (mask_key_log)
 			{
+				convertedMsg = DirectFunctionCall4Coll(textregexreplace,
+													   C_COLLATION_OID,
+													   replaceMsg_tmp,
+													   regex,
+													   mask,
+													   flag);
 				pfree((void *) replaceMsg_tmp);
+				replaceMsg_tmp = convertedMsg;
 			}
+
+			if (mask_query_literals)
+			{
+				convertedMsg = mask_string_literals(replaceMsg_tmp);
+				pfree((void *) replaceMsg_tmp);
+				replaceMsg_tmp = convertedMsg;
+			}
+
 			/* do not leave anything relate to key info in memory */
 			secure_memset(edata->context, 0, strlen(edata->context) + 1);
 			pfree(edata->context);
-			edata->context = TextDatumGetCString(convertedMsg);
-			if (convertedMsg)
+			edata->context = TextDatumGetCString(replaceMsg_tmp);
+			if (replaceMsg_tmp)
 			{
-				pfree((void *) convertedMsg);
+				pfree((void *) replaceMsg_tmp);
 			}
 		}
 		if (regex)
