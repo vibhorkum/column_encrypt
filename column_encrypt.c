@@ -126,7 +126,7 @@ static bool encrypt_enable = true;
 /* whether mask mask_query_log query log or not */
 static bool mask_key_log = true;
 
-/* whether to mask single-quoted string literals in query logs */
+/* whether to mask string literals (single-quoted and dollar-quoted) in query logs */
 static bool mask_query_literals = false;
 
 /* backup of log_min_error_statement value*/
@@ -197,7 +197,7 @@ _PG_init(void)
 							NULL);
 
 	DefineCustomBoolVariable("encrypt.mask_query_literals",
-							 "Mask single-quoted string literals in query logs as '***' (does not cover dollar-quoted strings).",
+							 "Mask string literals (single-quoted and dollar-quoted) in query logs to prevent data leakage.",
 							 NULL,
 							 &mask_query_literals,
 							 false,
@@ -234,9 +234,9 @@ _PG_fini(void)
  * @return    nothing
  */
 /*
- * mask_string_literals - Helper to mask single-quoted string literals in text
- * Replaces 'anything' with '***' to prevent sensitive data leakage.
- * Note: Does not mask dollar-quoted strings ($$text$$, $tag$text$tag$).
+ * mask_string_literals - Helper to mask string literals in text
+ * Masks single-quoted strings and dollar-quoted strings to prevent
+ * sensitive data leakage in logs.
  */
 static Datum
 mask_string_literals(Datum input_text)
@@ -244,12 +244,14 @@ mask_string_literals(Datum input_text)
 	Datum		regex_literal,
 				mask_literal,
 				flag,
-				result;
+				result,
+				temp;
 
-	/* Match single-quoted strings, handling escaped quotes */
+	flag = CStringGetTextDatum("g");
+
+	/* Step 1: Mask single-quoted strings, handling escaped quotes */
 	regex_literal = CStringGetTextDatum("'([^']*|'')*'");
 	mask_literal = CStringGetTextDatum("'***'");
-	flag = CStringGetTextDatum("g");
 
 	result = DirectFunctionCall4Coll(textregexreplace,
 									 C_COLLATION_OID,
@@ -258,6 +260,38 @@ mask_string_literals(Datum input_text)
 									 mask_literal,
 									 flag);
 
+	pfree((void *) regex_literal);
+	pfree((void *) mask_literal);
+
+	/* Step 2: Mask empty-tag dollar-quoted strings ($$...$$) */
+	regex_literal = CStringGetTextDatum("\\$\\$([^$]|\\$[^$])*\\$\\$");
+	mask_literal = CStringGetTextDatum("$$***$$");
+
+	temp = result;
+	result = DirectFunctionCall4Coll(textregexreplace,
+									 C_COLLATION_OID,
+									 temp,
+									 regex_literal,
+									 mask_literal,
+									 flag);
+
+	pfree((void *) temp);
+	pfree((void *) regex_literal);
+	pfree((void *) mask_literal);
+
+	/* Step 3: Mask tagged dollar-quoted strings ($tag$...$tag$) */
+	regex_literal = CStringGetTextDatum("\\$([A-Za-z_][A-Za-z0-9_]*)\\$([^$]|\\$[^$])*\\$\\1\\$");
+	mask_literal = CStringGetTextDatum("$\\1$***$\\1$");
+
+	temp = result;
+	result = DirectFunctionCall4Coll(textregexreplace,
+									 C_COLLATION_OID,
+									 temp,
+									 regex_literal,
+									 mask_literal,
+									 flag);
+
+	pfree((void *) temp);
 	pfree((void *) regex_literal);
 	pfree((void *) mask_literal);
 	pfree((void *) flag);
