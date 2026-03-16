@@ -185,10 +185,10 @@ jobs:
           # Test is_key_loaded function
           psql -h /tmp -p $PGPORT -d test_prod_ops -At \
             -c "SELECT is_key_loaded();" | grep -Fx 'f'
-          # Test cipher_metrics returns valid JSON
+          # Test cipher_metrics returns rows
           psql -h /tmp -p $PGPORT -d test_prod_ops -At \
-            -c "SELECT cipher_metrics()::jsonb IS NOT NULL;"
+            -c "SELECT COUNT(*) > 0 FROM cipher_metrics();" | grep -Fx 't'
           # Test cipher_coverage_summary
           psql -h /tmp -p $PGPORT -d test_prod_ops -At \
-            -c "SELECT COUNT(*) >= 0 FROM cipher_coverage_summary();"
+            -c "SELECT COUNT(*) >= 0 FROM cipher_coverage_summary();" | grep -Fx 't'
           pg_ctl -D "$PGDATA" stop
