@@ -4,7 +4,7 @@ set -euo pipefail
 PG_MAJOR="${PG_MAJOR:-18}"
 PG_BINDIR="/usr/lib/postgresql/${PG_MAJOR}/bin"
 COMPOSE_FILE="docker/docker-compose.replication.yml"
-REPO_DIR="/workspace"
+BUILD_DIR="/tmp/column-encrypt-src"
 
 docker_compose() {
   docker compose -f "${COMPOSE_FILE}" "$@"
@@ -24,7 +24,10 @@ init_service() {
   exec_service "${service}" "
     set -euo pipefail
     export PATH='${PG_BINDIR}':\$PATH
-    cd '${REPO_DIR}'
+    # Copy repo from read-only mount to temp build dir
+    rm -rf '${BUILD_DIR}'
+    cp -a /workspace '${BUILD_DIR}'
+    cd '${BUILD_DIR}'
     make clean PG_CONFIG='${PG_BINDIR}/pg_config'
     make PG_CONFIG='${PG_BINDIR}/pg_config'
     make install PG_CONFIG='${PG_BINDIR}/pg_config'

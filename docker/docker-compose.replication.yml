@@ -9,10 +9,10 @@ services:
     command: ["bash", "-lc", "sleep infinity"]
     environment:
       PG_MAJOR: ${PG_MAJOR:-18}
-      REPO_DIR: /workspace
+      REPO_DIR: /tmp/column-encrypt-src
     hostname: publisher
     volumes:
-      - ..:/workspace
+      - ..:/workspace:ro
 
   subscriber:
     image: column-encrypt-subscriber:${PG_MAJOR:-18}
@@ -24,7 +24,7 @@ services:
     command: ["bash", "-lc", "sleep infinity"]
     environment:
       PG_MAJOR: ${PG_MAJOR:-18}
-      REPO_DIR: /workspace
+      REPO_DIR: /tmp/column-encrypt-src
     hostname: subscriber
     volumes:
-      - ..:/workspace
+      - ..:/workspace:ro

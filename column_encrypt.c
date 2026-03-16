@@ -288,10 +288,13 @@ suppress_keylog_hook(ErrorData *edata)
 
 	if ((mask_key_log || mask_query_literals) && !(being_hook))
 	{
-		/* Arguments of textregexreplace for key management functions */
-		regex = CStringGetTextDatum("((\"?[A-Za-z_][A-Za-z0-9_]*\"?[[:space:]]*\\.[[:space:]]*)*\"?(register_cipher_key|load_key_by_version|load_key|enc_store_key|enc_store_prv_key)\"?[[:space:]]*\\([^\\)]*\\))"),
-			mask = CStringGetTextDatum("column_encrypt_sensitive_call(*****)"),
+		/* Only allocate regex/mask/flag when mask_key_log is enabled */
+		if (mask_key_log)
+		{
+			regex = CStringGetTextDatum("((\"?[A-Za-z_][A-Za-z0-9_]*\"?[[:space:]]*\\.[[:space:]]*)*\"?(register_cipher_key|load_key_by_version|load_key|enc_store_key|enc_store_prv_key)\"?[[:space:]]*\\([^\\)]*\\))");
+			mask = CStringGetTextDatum("column_encrypt_sensitive_call(*****)");
 			flag = CStringGetTextDatum("gi");
+		}
 
 		/* protect from recursive call */
 		being_hook = true;
@@ -1223,10 +1226,10 @@ extract_key_version(bytea *input_data)
 
 	memcpy(&key_ver_net, VARDATA_ANY(input_data), sizeof(uint16_t));
 	key_ver = (int) ntohs(key_ver_net);
-	if (key_ver <= 0)
+	if (key_ver <= 0 || key_ver > 32767)
 	{
 		ereport(ERROR, (errcode(ERRCODE_INVALID_BINARY_REPRESENTATION),
-						errmsg("encrypted value uses an invalid key version")));
+						errmsg("encrypted value uses an invalid key version %d (must be 1-32767)", key_ver)));
 	}
 
 	return key_ver;

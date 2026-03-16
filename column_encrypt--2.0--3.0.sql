@@ -798,6 +798,7 @@ DECLARE
     v_versions   integer[];
     v_sql        text;
     v_loaded     integer[];
+    rec          record;
 BEGIN
     /* Validate the schema/table/column names */
     IF p_schema !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' OR
@@ -863,6 +864,7 @@ BEGIN
     /* Sample and test decryption */
     v_success := 0;
     v_failed := 0;
+    v_sampled := 0;
 
     /* Count successful decryptions by casting to text (which triggers decryption) */
     BEGIN
@@ -879,10 +881,25 @@ BEGIN
         v_failed := 0;
     EXCEPTION
         WHEN OTHERS THEN
-            /* If bulk decryption fails, try row-by-row */
-            v_sampled := LEAST(v_total, p_sample_size);
-            v_failed := v_sampled;
+            /* Bulk decryption failed; try row-by-row to get accurate counts */
             v_success := 0;
+            v_failed := 0;
+            FOR rec IN EXECUTE format(
+                'SELECT ctid FROM %I.%I WHERE %I IS NOT NULL LIMIT %s',
+                p_schema, p_table, p_column, p_sample_size
+            ) LOOP
+                v_sampled := v_sampled + 1;
+                BEGIN
+                    EXECUTE format(
+                        'SELECT %I::text FROM %I.%I WHERE ctid = $1',
+                        p_column, p_schema, p_table
+                    ) USING rec.ctid;
+                    v_success := v_success + 1;
+                EXCEPTION
+                    WHEN OTHERS THEN
+                        v_failed := v_failed + 1;
+                END;
+            END LOOP;
     END;
 
     check_name := 'decryption_verification';
