@@ -61,7 +61,7 @@ The extension registers two custom base types (`encrypted_text`, `encrypted_byte
 
 - **On `INSERT`/`UPDATE`**: the type input function (`col_enc_text_in` / `col_enc_bytea_in`) transparently encrypts the supplied plaintext value using the session's currently loaded DEK.
 - **On `SELECT`**: the type output function (`col_enc_text_out` / `col_enc_bytea_out`) transparently decrypts the stored ciphertext using the matching session-loaded key for that ciphertext version.
-- A **2-byte key version header** is prepended to every ciphertext and used during decryption and re-encryption workflows.
+- A **2-byte key version header** is prepended to every ciphertext and used during decryption and re-encryption workflows. The header uses an unambiguous format: bit 15 (0x8000) is set as a flag, with the key version (1-32767) stored in the low 15 bits in network byte order. This ensures cross-platform compatibility and eliminates ambiguity when reading ciphertext. Legacy data written before this format is auto-detected and handled via fallback logic.
 - Keys are held in **`TopMemoryContext`** as a versioned in-memory keyring and are securely zeroed with `secure_memset` when removed from session memory.
 - An **`emit_log_hook`** masks known sensitive key-management function calls in log messages (query text, detail, context, internal query) to reduce accidental key leakage.
 - Administrative and runtime functions are gated by dedicated extension roles instead of `PUBLIC` execution.
