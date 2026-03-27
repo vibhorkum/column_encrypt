@@ -52,17 +52,38 @@ PostgreSQL must be running with `shared_preload_libraries = 'column_encrypt'` in
 
 When modifying SQL functions:
 
-1. **SECURITY DEFINER functions must schema-qualify external calls**:
-   - pgcrypto calls: `public.pgp_sym_encrypt()`, `public.pgp_sym_decrypt()`
-   - This prevents search_path hijacking where an attacker creates a malicious
-     function in `public` that shadows the real pgcrypto function
+1. **SECURITY DEFINER functions must use `SET search_path TO pg_catalog`**:
+   - This prevents search_path hijacking attacks
+   - All object references must be schema-qualified (e.g., `@extschema@.cipher_key_table`,
+     `pg_catalog.pg_attribute`)
 
-2. **Upgrade scripts must maintain security parity with fresh installs**:
+2. **Use `@extschema@` for extension objects, not hardcoded `public`**:
+   - The extension is non-relocatable but can be installed in any schema
+   - PostgreSQL substitutes `@extschema@` with the actual extension schema at install time
+   - Examples: `@extschema@.cipher_key_table`, `@extschema@.enc_store_key()`
+
+3. **Dynamic pgcrypto schema lookup**:
+   - pgcrypto can be installed in any schema, not just `public`
+   - Use `encrypt._pgcrypto_schema()` to get the actual schema at runtime
+   - Use dynamic SQL with `format()` and `EXECUTE` for pgcrypto calls:
+     ```sql
+     v_pgcrypto_schema := encrypt._pgcrypto_schema();
+     EXECUTE format('SELECT %I.pgp_sym_encrypt($1, $2, $3)', v_pgcrypto_schema)
+        INTO v_wrapped_key
+       USING dek, passphrase, 'cipher-algo=aes256, s2k-mode=3';
+     ```
+
+4. **Type name lookups in SECURITY DEFINER context**:
+   - When `search_path = pg_catalog`, `format_type()` returns schema-qualified names
+   - Use `typname` from `pg_type` for comparisons (e.g., `encrypted_text`)
+   - Use schema-qualified names for dynamic SQL casts (lookup from `pg_namespace`)
+   - Example: get both values in one query by joining `pg_type` and `pg_namespace`
+
+5. **Upgrade scripts must maintain security parity with fresh installs**:
    - If a function is redefined in an upgrade script, apply the same security
      patterns as the fresh install script
 
-3. **Assumption**: pgcrypto is installed in `public` schema (the PostgreSQL default).
-   The `requires = 'pgcrypto'` in `column_encrypt.control` ensures pgcrypto exists.
+6. **The `requires = 'pgcrypto'` in `column_encrypt.control` ensures pgcrypto exists**.
 
 ### v4.0 API (encrypt schema)
 
