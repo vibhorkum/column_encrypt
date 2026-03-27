@@ -241,10 +241,10 @@ jobs:
           psql -h /tmp -p $PGPORT -d test_v40_fresh \
             -c "CREATE ROLE test_user LOGIN; GRANT column_encrypt_user TO test_user;"
           psql -h /tmp -p $PGPORT -d test_v40_fresh -c "SET ROLE test_user; SELECT encrypt.register_key('my-32-byte-test-encryption-key!!', 'test-pass');" | grep -F '1'
-          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "SET ROLE test_user; SELECT encrypt.load_key('test-pass');" | grep -F 't'
-          # Create encrypted data
-          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "CREATE TABLE secrets (id serial, data encrypted_text); INSERT INTO secrets(data) VALUES ('secret-value');"
-          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "SELECT data FROM secrets;" | grep -F 'secret-value'
-          # Test status function
-          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "SELECT key_loaded FROM encrypt.status();" | grep -F 't'
+          # Create table (no key needed for DDL)
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "CREATE TABLE secrets (id serial, data encrypted_text);"
+          # Load key, insert, and verify in same session (keys are session-scoped)
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "SELECT encrypt.load_key('test-pass'); INSERT INTO secrets(data) VALUES ('secret-value'); SELECT data FROM secrets;" | grep -F 'secret-value'
+          # Test status in session with key loaded
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "SELECT encrypt.load_key('test-pass'); SELECT key_loaded FROM encrypt.status();" | grep -F 't'
           pg_ctl -D "$PGDATA" stop
