@@ -162,6 +162,8 @@ SELECT * FROM encrypt.status();
 
 ## Step 3: Update Role Grants
 
+**Important**: The v4.0 upgrade **revokes permissions** from the legacy 3-role system (`column_encrypt_admin`, `column_encrypt_runtime`, `column_encrypt_reader`). You must complete this step **before** upgrading to v4.0.
+
 If you were using the 3-role system, migrate to the unified role:
 
 ```sql
@@ -179,6 +181,8 @@ GRANT USAGE ON SCHEMA encrypt TO auditor;
 GRANT EXECUTE ON FUNCTION encrypt.keys() TO auditor;
 GRANT EXECUTE ON FUNCTION encrypt.status() TO auditor;
 ```
+
+**Note**: The legacy roles themselves are not dropped (to preserve any existing `GRANT role TO user` chains), but their permissions on `encrypt.*` functions are revoked during the v4.0 upgrade.
 
 ## Step 4: Upgrade to v4.0
 

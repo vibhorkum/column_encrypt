@@ -96,7 +96,8 @@ DROP FUNCTION IF EXISTS enc_rm_prv_key();
  * CLEAN UP ROLES
  * =============================================================================
  * Keep column_encrypt_user as the canonical role.
- * Old roles are NOT dropped (would break existing grants) but revoked new permissions.
+ * Old roles are NOT dropped (would break existing grants) but permissions are revoked.
+ * Users should migrate to column_encrypt_user (see MIGRATION.md Step 3).
  */
 
 -- Ensure new role exists
@@ -104,6 +105,31 @@ DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'column_encrypt_user') THEN
         EXECUTE 'CREATE ROLE column_encrypt_user NOLOGIN';
+    END IF;
+END;
+$$;
+
+-- Revoke permissions from legacy 3-role system (granted in v3.3 for compatibility).
+-- This aligns upgraded databases with fresh v4.0 installs which only use column_encrypt_user.
+-- The roles themselves are kept (dropping would break GRANT role TO user chains).
+DO $$
+BEGIN
+    -- Revoke from column_encrypt_admin if it exists
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'column_encrypt_admin') THEN
+        EXECUTE 'REVOKE USAGE ON SCHEMA encrypt FROM column_encrypt_admin';
+        EXECUTE 'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA encrypt FROM column_encrypt_admin';
+    END IF;
+
+    -- Revoke from column_encrypt_runtime if it exists
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'column_encrypt_runtime') THEN
+        EXECUTE 'REVOKE USAGE ON SCHEMA encrypt FROM column_encrypt_runtime';
+        EXECUTE 'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA encrypt FROM column_encrypt_runtime';
+    END IF;
+
+    -- Revoke from column_encrypt_reader if it exists
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'column_encrypt_reader') THEN
+        EXECUTE 'REVOKE USAGE ON SCHEMA encrypt FROM column_encrypt_reader';
+        EXECUTE 'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA encrypt FROM column_encrypt_reader';
     END IF;
 END;
 $$;
