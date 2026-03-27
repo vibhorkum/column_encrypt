@@ -224,6 +224,8 @@ Grant the unified role to your user:
 GRANT column_encrypt_user TO your_role;
 ```
 
-### "EDB-ENC0012: incorrect decryption key"
+### "incorrect passphrase" (SQLSTATE: invalid_password)
 
 The passphrase doesn't match. Ensure you're using the correct KEK (passphrase) that was used to wrap the DEK during `encrypt.register_key()`.
+
+**Note**: In v4.0, the error message is `incorrect passphrase` with SQLSTATE `invalid_password`. Legacy versions used `EDB-ENC0012: incorrect decryption key`.

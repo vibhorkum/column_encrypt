@@ -237,14 +237,20 @@ jobs:
           # Verify clean API (no deprecated functions)
           psql -h /tmp -p $PGPORT -d test_v40_fresh -At \
             -c "SELECT COUNT(*) FROM pg_proc WHERE proname = 'cipher_key_disable_log';" | grep -Fx '0'
-          # Test basic workflow
+          # Setup test_user with column_encrypt_user role
           psql -h /tmp -p $PGPORT -d test_v40_fresh \
-            -c "CREATE ROLE test_user LOGIN; GRANT column_encrypt_user TO test_user;"
-          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "SET ROLE test_user; SELECT encrypt.register_key('my-32-byte-test-encryption-key!!', 'test-pass');" | grep -F '1'
-          # Create table (no key needed for DDL)
-          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "CREATE TABLE secrets (id serial, data encrypted_text);"
-          # Load key, insert, and verify in same session (keys are session-scoped)
-          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "SELECT encrypt.load_key('test-pass'); INSERT INTO secrets(data) VALUES ('secret-value'); SELECT data FROM secrets;" | grep -F 'secret-value'
-          # Test status in session with key loaded
-          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "SELECT encrypt.load_key('test-pass'); SELECT key_loaded FROM encrypt.status();" | grep -F 't'
+            -c "CREATE ROLE test_user LOGIN; GRANT column_encrypt_user TO test_user; GRANT CREATE ON SCHEMA public TO test_user;"
+          # Test full workflow as test_user (non-superuser with granted role)
+          # Register key and verify return value
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -U test_user -At \
+            -c "SELECT encrypt.register_key('my-32-byte-test-encryption-key!!', 'test-pass');" | grep -Fx '1'
+          # Create table as test_user
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -U test_user \
+            -c "CREATE TABLE secrets (id serial, data encrypted_text);"
+          # Load key, insert, select in same session as test_user (keys are session-scoped)
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -U test_user -At \
+            -c "SELECT encrypt.load_key('test-pass'); INSERT INTO secrets(data) VALUES ('secret-value'); SELECT data FROM secrets;" | grep -Fx 'secret-value'
+          # Test status function as test_user
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -U test_user -At \
+            -c "SELECT encrypt.load_key('test-pass'); SELECT key_loaded FROM encrypt.status();" | grep -Fx 't'
           pg_ctl -D "$PGDATA" stop

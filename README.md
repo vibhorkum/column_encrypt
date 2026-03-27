@@ -240,10 +240,10 @@ This is the expected result — without loading the key, the ciphertext cannot b
 
 ```sql
 test=# SELECT encrypt.load_key('wrong-passphrase');
-ERROR:  EDB-ENC0012: incorrect decryption key
+ERROR:  incorrect passphrase
 ```
 
-This is also expected — an incorrect passphrase is rejected.
+This is also expected — an incorrect passphrase is rejected (SQLSTATE: `invalid_password`).
 
 ---
 
@@ -410,26 +410,25 @@ The DEK is wrapped using AES-256/S2K (iterated-salted string-to-key) via `pgp_sy
 
 ---
 
-## Error Codes
+## Error Messages (v4.0)
 
-| Code | Message | Cause |
+The v4.0 API uses standard PostgreSQL error messages with SQLSTATE codes:
+
+| SQLSTATE | Message | Cause |
 |---|---|---|
-| `EDB-ENC0002` | new cipher key is invalid | DEK is NULL or empty |
-| `EDB-ENC0003` | invalid cipher algorithm | Algorithm is not `aes` |
-| `EDB-ENC0012` | cipher key is not correct | Master passphrase failed to decrypt wrapped key |
-| `EDB-ENC0037` | master passphrase is invalid | Master passphrase is NULL or empty |
-| `EDB-ENC0041` | invalid schema/table/column name | Re-encryption target name contains invalid characters |
-| `EDB-ENC0042` | column not found | Re-encryption target column does not exist |
-| `EDB-ENC0043` | key version must be a positive integer | Key version is NULL, zero, or negative |
-| `EDB-ENC0044` | key version is already registered | Attempted to register duplicate key version |
-| `EDB-ENC0045` | more than one active key exists | Multiple keys have `active` state (integrity error) |
-| `EDB-ENC0046` | column is not an encrypted column | Re-encryption target is not `encrypted_text` or `encrypted_bytea` |
-| `EDB-ENC0047` | batch size must be a positive integer | Batch re-encryption size is invalid |
-| `EDB-ENC0048` | encrypt.enable must be on | Re-encryption attempted with encryption disabled |
-| `EDB-ENC0049` | cipher key must be at least 16 bytes | DEK is too short for cryptographic strength |
-| `EDB-ENC0050` | expiration time must be in the future | Key expiration timestamp is in the past |
-| `EDB-ENC0051` | cannot activate expired key | Attempted to activate a key past its expiration |
-| `EDB-ENC0052` | key version must not exceed 32767 | Key version exceeds ciphertext header limit |
+| `invalid_parameter_value` | encryption key cannot be null or empty | DEK is NULL or empty |
+| `invalid_parameter_value` | encryption key must be at least 16 bytes | DEK is too short (use 32 bytes for AES-256) |
+| `invalid_parameter_value` | passphrase cannot be null or empty | Passphrase is NULL or empty |
+| `invalid_password` | incorrect passphrase | Master passphrase failed to decrypt wrapped key |
+| `invalid_password` | failed to decrypt key version N | Passphrase incorrect for specific key version |
+| `invalid_name` | invalid identifier | Schema/table/column name contains invalid characters |
+| `undefined_column` | column not found | Target column does not exist |
+| `wrong_object_type` | not an encrypted column | Target is not `encrypted_text` or `encrypted_bytea` |
+| `feature_not_supported` | encryption must be enabled | Operation attempted with `encrypt.enable = off` |
+| `data_exception` | cannot activate expired key | Key's `expires_at` is in the past |
+| `program_limit_exceeded` | maximum key version (32767) exceeded | Key version exceeds ciphertext header limit |
+
+**Note**: Legacy error codes (`EDB-ENC*`) from the C layer may still appear for type I/O errors (e.g., "cannot decrypt data, because key was not set").
 
 ---
 
