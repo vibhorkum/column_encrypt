@@ -204,7 +204,8 @@ BEGIN
     INSERT INTO cipher_key_table(key_version, wrapped_key, algorithm, key_state, state_changed_at)
     VALUES(
         v_key_id,
-        pgp_sym_encrypt(dek, passphrase, 'cipher-algo=aes256, s2k-mode=3'),
+        -- Schema-qualify pgcrypto call to prevent search_path hijacking in SECURITY DEFINER context
+        public.pgp_sym_encrypt(dek, passphrase, 'cipher-algo=aes256, s2k-mode=3'),
         'aes',
         CASE WHEN activate THEN 'active' ELSE 'pending' END,
         now()
@@ -246,8 +247,9 @@ BEGIN
         LOOP
             BEGIN
                 PERFORM set_config('encrypt.key_version', v_key_version::text, true);
+                -- Schema-qualify pgcrypto call to prevent search_path hijacking in SECURITY DEFINER context
                 PERFORM enc_store_key(
-                    pgp_sym_decrypt(wrapped_key, passphrase), algorithm
+                    public.pgp_sym_decrypt(wrapped_key, passphrase), algorithm
                 ) FROM cipher_key_table WHERE key_version = v_key_version;
                 v_count := v_count + 1;
             EXCEPTION WHEN OTHERS THEN
@@ -279,8 +281,9 @@ BEGIN
 
         BEGIN
             PERFORM set_config('encrypt.key_version', v_key_version::text, false);
+            -- Schema-qualify pgcrypto call to prevent search_path hijacking in SECURITY DEFINER context
             PERFORM enc_store_key(
-                pgp_sym_decrypt(wrapped_key, passphrase), algorithm
+                public.pgp_sym_decrypt(wrapped_key, passphrase), algorithm
             ) FROM cipher_key_table WHERE key_state = 'active';
 
             UPDATE cipher_key_table

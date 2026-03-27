@@ -46,6 +46,23 @@ PostgreSQL must be running with `shared_preload_libraries = 'column_encrypt'` in
 2. **DEK (Data Encryption Key)**: Wrapped with KEK using pgcrypto's `pgp_sym_encrypt`
 3. **Session Isolation**: Keys loaded per-connection, cleared on disconnect
 4. **Log Protection**: Automatic masking of sensitive function calls
+5. **SECURITY DEFINER Safety**: All definer functions schema-qualify external calls
+
+### Security Guidelines for Contributors
+
+When modifying SQL functions:
+
+1. **SECURITY DEFINER functions must schema-qualify external calls**:
+   - pgcrypto calls: `public.pgp_sym_encrypt()`, `public.pgp_sym_decrypt()`
+   - This prevents search_path hijacking where an attacker creates a malicious
+     function in `public` that shadows the real pgcrypto function
+
+2. **Upgrade scripts must maintain security parity with fresh installs**:
+   - If a function is redefined in an upgrade script, apply the same security
+     patterns as the fresh install script
+
+3. **Assumption**: pgcrypto is installed in `public` schema (the PostgreSQL default).
+   The `requires = 'pgcrypto'` in `column_encrypt.control` ensures pgcrypto exists.
 
 ### v4.0 API (encrypt schema)
 
