@@ -369,6 +369,91 @@ END;
 $$;
 RESET ROLE;
 
+-- Empty passphrase should be rejected
+SET ROLE regress_user;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.load_key('');
+        RAISE EXCEPTION 'encrypt.load_key unexpectedly succeeded with empty passphrase';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            RAISE NOTICE 'empty passphrase rejected as expected';
+    END;
+END;
+$$;
+RESET ROLE;
+
+-- NULL passphrase should be rejected
+SET ROLE regress_user;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.load_key(NULL);
+        RAISE EXCEPTION 'encrypt.load_key unexpectedly succeeded with NULL passphrase';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            RAISE NOTICE 'NULL passphrase rejected as expected';
+    END;
+END;
+$$;
+RESET ROLE;
+
+-- batch_size <= 0 should be rejected
+SET ROLE regress_user;
+SELECT encrypt.load_key('my-master-passphrase', true);
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.rotate('public', 'test_enc_text', 'ssn', 0);
+        RAISE EXCEPTION 'encrypt.rotate unexpectedly succeeded with batch_size=0';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            RAISE NOTICE 'batch_size=0 rejected as expected';
+    END;
+END;
+$$;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.rotate('public', 'test_enc_text', 'ssn', -1);
+        RAISE EXCEPTION 'encrypt.rotate unexpectedly succeeded with batch_size=-1';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            RAISE NOTICE 'negative batch_size rejected as expected';
+    END;
+END;
+$$;
+RESET ROLE;
+
+-- sample_size <= 0 should be rejected
+SET ROLE regress_user;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.verify('public', 'test_enc_text', 'ssn', 0);
+        RAISE EXCEPTION 'encrypt.verify unexpectedly succeeded with sample_size=0';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            RAISE NOTICE 'sample_size=0 rejected as expected';
+    END;
+END;
+$$;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.verify('public', 'test_enc_text', 'ssn', -1);
+        RAISE EXCEPTION 'encrypt.verify unexpectedly succeeded with sample_size=-1';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            RAISE NOTICE 'negative sample_size rejected as expected';
+    END;
+END;
+$$;
+RESET ROLE;
+
 -- =============================================================================
 -- STATUS AND INTROSPECTION
 -- =============================================================================

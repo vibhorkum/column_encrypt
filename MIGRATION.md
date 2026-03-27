@@ -173,7 +173,11 @@ GRANT column_encrypt_reader TO auditor;
 -- New way: single role for all encryption operations
 GRANT column_encrypt_user TO key_manager;
 GRANT column_encrypt_user TO app_user;
--- For read-only access, just grant SELECT on encrypt.keys()
+
+-- For read-only access (auditors), grant only metadata functions:
+GRANT USAGE ON SCHEMA encrypt TO auditor;
+GRANT EXECUTE ON FUNCTION encrypt.keys() TO auditor;
+GRANT EXECUTE ON FUNCTION encrypt.status() TO auditor;
 ```
 
 ## Step 4: Upgrade to v4.0

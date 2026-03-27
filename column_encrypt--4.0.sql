@@ -278,15 +278,16 @@ BEGIN
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
 
-    -- Get next key ID
+    -- Lock first to prevent concurrent registration race
+    LOCK TABLE cipher_key_table IN EXCLUSIVE MODE;
+
+    -- Get next key ID (after lock to prevent race condition)
     SELECT COALESCE(MAX(key_version), 0) + 1 INTO v_key_id FROM cipher_key_table;
 
     IF v_key_id > 32767 THEN
         RAISE EXCEPTION 'maximum key version (32767) exceeded'
             USING ERRCODE = 'program_limit_exceeded';
     END IF;
-
-    LOCK TABLE cipher_key_table IN EXCLUSIVE MODE;
 
     IF activate THEN
         UPDATE cipher_key_table
@@ -323,14 +324,18 @@ AS $$
 DECLARE
     v_key_version INTEGER;
     v_count INTEGER := 0;
+    v_prev_key_version TEXT;
 BEGIN
     PERFORM pgstat_actv_mask();
     SET LOCAL track_activities = off;
 
+    -- Save previous GUC value for restore on failure
+    v_prev_key_version := current_setting('encrypt.key_version', true);
+
     PERFORM enc_rm_key();
 
-    IF passphrase IS NULL THEN
-        RAISE EXCEPTION 'passphrase cannot be null'
+    IF passphrase IS NULL OR passphrase = '' THEN
+        RAISE EXCEPTION 'passphrase cannot be null or empty'
             USING ERRCODE = 'invalid_parameter_value';
     END IF;
 
@@ -347,6 +352,12 @@ BEGIN
                 v_count := v_count + 1;
             EXCEPTION WHEN OTHERS THEN
                 PERFORM enc_rm_key();
+                -- Restore previous GUC value
+                IF v_prev_key_version IS NOT NULL AND v_prev_key_version <> '' THEN
+                    PERFORM set_config('encrypt.key_version', v_prev_key_version, false);
+                ELSE
+                    PERFORM set_config('encrypt.key_version', '', false);
+                END IF;
                 RAISE EXCEPTION 'failed to decrypt key version %', v_key_version
                     USING ERRCODE = 'invalid_password';
             END;
@@ -377,6 +388,12 @@ BEGIN
             v_count := 1;
         EXCEPTION WHEN OTHERS THEN
             PERFORM enc_rm_key();
+            -- Restore previous GUC value
+            IF v_prev_key_version IS NOT NULL AND v_prev_key_version <> '' THEN
+                PERFORM set_config('encrypt.key_version', v_prev_key_version, false);
+            ELSE
+                PERFORM set_config('encrypt.key_version', '', false);
+            END IF;
             RAISE EXCEPTION 'incorrect passphrase'
                 USING ERRCODE = 'invalid_password';
         END;
@@ -488,6 +505,11 @@ BEGIN
             USING ERRCODE = 'feature_not_supported';
     END IF;
 
+    IF batch_size IS NULL OR batch_size <= 0 THEN
+        RAISE EXCEPTION 'batch_size must be greater than 0'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
     IF schema_name !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' OR
        table_name  !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' OR
        column_name !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' THEN
@@ -554,11 +576,17 @@ DECLARE
     v_col_type TEXT;
     rec RECORD;
 BEGIN
+    IF sample_size IS NULL OR sample_size <= 0 THEN
+        RAISE EXCEPTION 'sample_size must be greater than 0'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
     SELECT format_type(a.atttypid, a.atttypmod) INTO v_col_type
       FROM pg_attribute a
       JOIN pg_class c ON c.oid = a.attrelid
       JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE n.nspname = schema_name AND c.relname = table_name AND a.attname = column_name;
+     WHERE n.nspname = schema_name AND c.relname = table_name
+       AND a.attname = column_name AND a.attnum > 0 AND NOT a.attisdropped;
 
     IF v_col_type IS NULL THEN
         status := 'error'; message := 'column not found'; RETURN NEXT; RETURN;
