@@ -121,3 +121,45 @@ Co-Authored-By: <name> <email>
 ```
 
 Types: `fix`, `feat`, `refactor`, `docs`, `test`, `security`, `build`
+
+---
+
+## Comprehensive Repository Review Prompt
+
+Use this prompt to request a full maintainer-grade assessment:
+
+---
+
+Review this repository end-to-end and produce one consolidated maintainer-grade assessment of column_encrypt.
+
+Do a deep review across:
+- extension architecture
+- PostgreSQL extension versioning and upgrade scripts
+- C code structure and safety
+- SQL/PLpgSQL API complexity
+- roles and permissions
+- key management and encryption assumptions
+- tests and CI
+- documentation quality
+- simplification opportunities
+
+I do not want an incremental review. I want a one-shot review with as many findings as possible.
+
+Please perform multiple internal passes before answering:
+- pass 1: architecture and repository layout
+- pass 2: security and crypto-related logic
+- pass 3: SQL API and extension versioning
+- pass 4: tests, CI, and docs
+- pass 5: simplification roadmap
+
+Then return a single final report with:
+1. Executive summary
+2. Most serious risks
+3. Biggest complexity hotspots
+4. Inconsistencies between code, tests, and docs
+5. Concrete simplification recommendations
+6. Upgrade/migration concerns
+7. Suggested implementation order
+
+Reference specific files and functions wherever possible.
+Do not modify code yet.
