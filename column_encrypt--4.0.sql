@@ -574,8 +574,8 @@ BEGIN
         RAISE EXCEPTION 'invalid identifier' USING ERRCODE = 'invalid_name';
     END IF;
 
-    -- Get both typname (for comparison) and schema-qualified name (for dynamic SQL)
-    SELECT t.typname, tn.nspname || '.' || t.typname
+    -- Get both typname (for comparison) and safely-quoted schema-qualified name (for dynamic SQL)
+    SELECT t.typname, pg_catalog.format('%I.%I', tn.nspname, t.typname)
       INTO v_col_type, v_col_type_qualified
       FROM pg_catalog.pg_attribute a
       JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
@@ -747,11 +747,35 @@ COMMENT ON FUNCTION encrypt.status() IS
 
 /*
  * encrypt.blind_index - Create searchable blind index
+ *
+ * Uses dynamic SQL to call pgcrypto's hmac() in its actual schema.
  */
 CREATE FUNCTION encrypt.blind_index(value TEXT, hmac_key TEXT) RETURNS TEXT
-    LANGUAGE sql IMMUTABLE STRICT
+    LANGUAGE plpgsql IMMUTABLE STRICT
+    SET search_path TO pg_catalog
 AS $$
-    SELECT encode(hmac(convert_to(value, 'UTF8'), convert_to(hmac_key, 'UTF8'), 'sha256'), 'hex');
+DECLARE
+    v_pgcrypto_schema TEXT;
+    v_result TEXT;
+BEGIN
+    -- Look up pgcrypto schema dynamically
+    SELECT n.nspname INTO v_pgcrypto_schema
+      FROM pg_catalog.pg_extension e
+      JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'pgcrypto';
+
+    IF v_pgcrypto_schema IS NULL THEN
+        RAISE EXCEPTION 'pgcrypto extension is not installed'
+            USING ERRCODE = 'feature_not_supported';
+    END IF;
+
+    -- Use dynamic SQL to call hmac in its actual schema
+    EXECUTE format('SELECT pg_catalog.encode(%I.hmac(pg_catalog.convert_to($1, ''UTF8''), pg_catalog.convert_to($2, ''UTF8''), ''sha256''), ''hex'')', v_pgcrypto_schema)
+       INTO v_result
+      USING value, hmac_key;
+
+    RETURN v_result;
+END;
 $$;
 
 COMMENT ON FUNCTION encrypt.blind_index(TEXT, TEXT) IS

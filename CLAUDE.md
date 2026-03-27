@@ -79,11 +79,25 @@ When modifying SQL functions:
    - Use schema-qualified names for dynamic SQL casts (lookup from `pg_namespace`)
    - Example: get both values in one query by joining `pg_type` and `pg_namespace`
 
-5. **Upgrade scripts must maintain security parity with fresh installs**:
+5. **Dynamic SQL type casts must use quoted identifiers**:
+   - When building schema-qualified type names for dynamic SQL, use `format('%I.%I', schema, type)`
+   - Never use string concatenation (`schema || '.' || type`) as it breaks with special characters
+
+6. **All pgcrypto function calls must be schema-safe**:
+   - This includes `hmac()`, `pgp_sym_encrypt()`, `pgp_sym_decrypt()`, etc.
+   - Use `encrypt._pgcrypto_schema()` or direct lookup from `pg_extension`/`pg_namespace`
+   - Use dynamic SQL with `EXECUTE format('%I.function_name(...)', schema)`
+
+7. **Upgrade scripts must maintain security parity with fresh installs**:
    - If a function is redefined in an upgrade script, apply the same security
      patterns as the fresh install script
 
-6. **The `requires = 'pgcrypto'` in `column_encrypt.control` ensures pgcrypto exists**.
+8. **The `requires = 'pgcrypto'` in `column_encrypt.control` ensures pgcrypto exists**.
+
+9. **Documentation must use actual SQLSTATE codes**:
+   - When documenting SQLSTATE, use 5-character codes (e.g., `28P01`)
+   - Condition names (e.g., `invalid_password`) may be shown alongside but not instead of codes
+   - Reference: https://www.postgresql.org/docs/current/errcodes-appendix.html
 
 ### v4.0 API (encrypt schema)
 

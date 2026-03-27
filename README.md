@@ -243,7 +243,7 @@ test=# SELECT encrypt.load_key('wrong-passphrase');
 ERROR:  incorrect passphrase
 ```
 
-This is also expected — an incorrect passphrase is rejected (SQLSTATE: `invalid_password`).
+This is also expected — an incorrect passphrase is rejected (SQLSTATE `28P01`).
 
 ---
 
@@ -414,19 +414,19 @@ The DEK is wrapped using AES-256/S2K (iterated-salted string-to-key) via `pgp_sy
 
 The v4.0 API uses standard PostgreSQL error messages with SQLSTATE codes:
 
-| SQLSTATE | Message | Cause |
-|---|---|---|
-| `invalid_parameter_value` | encryption key cannot be null or empty | DEK is NULL or empty |
-| `invalid_parameter_value` | encryption key must be at least 16 bytes | DEK is too short (use 32 bytes for AES-256) |
-| `invalid_parameter_value` | passphrase cannot be null or empty | Passphrase is NULL or empty |
-| `invalid_password` | incorrect passphrase | Master passphrase failed to decrypt wrapped key |
-| `invalid_password` | failed to decrypt key version N | Passphrase incorrect for specific key version |
-| `invalid_name` | invalid identifier | Schema/table/column name contains invalid characters |
-| `undefined_column` | column not found | Target column does not exist |
-| `wrong_object_type` | not an encrypted column | Target is not `encrypted_text` or `encrypted_bytea` |
-| `feature_not_supported` | encryption must be enabled | Operation attempted with `encrypt.enable = off` |
-| `data_exception` | cannot activate expired key | Key's `expires_at` is in the past |
-| `program_limit_exceeded` | maximum key version (32767) exceeded | Key version exceeds ciphertext header limit |
+| SQLSTATE | Condition Name | Message | Cause |
+|---|---|---|---|
+| `22023` | `invalid_parameter_value` | encryption key cannot be null or empty | DEK is NULL or empty |
+| `22023` | `invalid_parameter_value` | encryption key must be at least 16 bytes | DEK is too short (use 32 bytes for AES-256) |
+| `22023` | `invalid_parameter_value` | passphrase cannot be null or empty | Passphrase is NULL or empty |
+| `28P01` | `invalid_password` | incorrect passphrase | Master passphrase failed to decrypt wrapped key |
+| `28P01` | `invalid_password` | failed to decrypt key version N | Passphrase incorrect for specific key version |
+| `42602` | `invalid_name` | invalid identifier | Schema/table/column name contains invalid characters |
+| `42703` | `undefined_column` | column not found | Target column does not exist |
+| `42809` | `wrong_object_type` | not an encrypted column | Target is not `encrypted_text` or `encrypted_bytea` |
+| `0A000` | `feature_not_supported` | encryption must be enabled | Operation attempted with `encrypt.enable = off` |
+| `22000` | `data_exception` | cannot activate expired key | Key's `expires_at` is in the past |
+| `54000` | `program_limit_exceeded` | maximum key version (32767) exceeded | Key version exceeds ciphertext header limit |
 
 **Note**: Legacy error codes (`EDB-ENC*`) from the C layer may still appear for type I/O errors (e.g., "cannot decrypt data, because key was not set").
 

@@ -95,7 +95,56 @@ SELECT data FROM test_enc_bytea ORDER BY id;
 -- BLIND INDEX
 -- =============================================================================
 
+-- Basic blind index generation
 SELECT encrypt.blind_index('123-45-6789', 'blind-index-secret');
+
+-- Consistency test: same input should produce same output
+SELECT encrypt.blind_index('test-value', 'secret-key') = encrypt.blind_index('test-value', 'secret-key') AS consistent;
+
+-- Different inputs produce different outputs
+SELECT encrypt.blind_index('value-a', 'key') <> encrypt.blind_index('value-b', 'key') AS different_values;
+
+-- Different keys produce different outputs
+SELECT encrypt.blind_index('same-value', 'key-1') <> encrypt.blind_index('same-value', 'key-2') AS different_keys;
+
+-- Output format: should be 64 hex characters (SHA-256 = 256 bits = 64 hex chars)
+SELECT length(encrypt.blind_index('test', 'key')) AS hex_length;
+
+-- STRICT function returns NULL for NULL inputs
+SELECT encrypt.blind_index(NULL, 'key') IS NULL AS null_value_returns_null;
+SELECT encrypt.blind_index('value', NULL) IS NULL AS null_key_returns_null;
+
+-- Practical use case: searchable blind index column
+CREATE TABLE test_blind_index (
+    id serial PRIMARY KEY,
+    ssn_encrypted encrypted_text,
+    ssn_blind_index text
+);
+
+-- Insert data with both encrypted value and blind index
+INSERT INTO test_blind_index (ssn_encrypted, ssn_blind_index)
+VALUES ('123-45-6789', encrypt.blind_index('123-45-6789', 'blind-secret'));
+INSERT INTO test_blind_index (ssn_encrypted, ssn_blind_index)
+VALUES ('987-65-4321', encrypt.blind_index('987-65-4321', 'blind-secret'));
+INSERT INTO test_blind_index (ssn_encrypted, ssn_blind_index)
+VALUES ('555-55-5555', encrypt.blind_index('555-55-5555', 'blind-secret'));
+
+-- Search using blind index (efficient lookup without decrypting all rows)
+SELECT id, ssn_encrypted
+FROM test_blind_index
+WHERE ssn_blind_index = encrypt.blind_index('123-45-6789', 'blind-secret');
+
+-- Verify we can find the correct record
+SELECT COUNT(*) AS found_count
+FROM test_blind_index
+WHERE ssn_blind_index = encrypt.blind_index('987-65-4321', 'blind-secret');
+
+-- Non-matching search returns no rows
+SELECT COUNT(*) AS not_found_count
+FROM test_blind_index
+WHERE ssn_blind_index = encrypt.blind_index('000-00-0000', 'blind-secret');
+
+DROP TABLE test_blind_index;
 
 -- =============================================================================
 -- ENCRYPT.ENABLE = OFF MODE
