@@ -35,15 +35,14 @@
 - **AES encryption** via the `pgcrypto` extension
 - **Key version header** embedded in every ciphertext for future key rotation tracking
 - **Version-aware decryption** using the ciphertext header and session-loaded keys
-- **Tighter log masking** focused on known sensitive function calls rather than all parenthesized log text
-- **Role-based execution model** with dedicated admin, runtime, and reader roles
+- **Single-role security model** with unified `column_encrypt_user` role
+- **Automatic log masking** for sensitive key operations (defense-in-depth)
 - **Key registry metadata** with explicit `pending`, `active`, `retired`, and `revoked` states
 - **Key rotation** support with both full-table and batched re-encryption helpers
 - **Optional blind-index helpers** for scalable equality lookup patterns
 - **Hash/equality semantics on decrypted plaintext** so comparisons remain correct across key rotation
 - **Session introspection helper** to show which key versions are currently loaded in the backend
 - **Cast support** from `bool`, `inet`, `cidr`, `xml`, and `character` to `encrypted_text`
-- **Logical replication readiness check** for encrypted tables
 
 ---
 
@@ -111,10 +110,26 @@ The extension registers two custom base types (`encrypted_text`, `encrypted_byte
 
 ### Upgrade Notes
 
-- `3.0` changes equality and hash semantics to operate on decrypted plaintext instead of raw ciphertext bytes.
-- After `ALTER EXTENSION column_encrypt UPDATE TO '3.0'`, rebuild any existing hash indexes on `encrypted_text` or `encrypted_bytea` columns with `REINDEX` or by dropping and recreating them.
-- For scalable equality lookups or uniqueness checks, prefer a companion blind-index column instead of direct encrypted-column hash indexing.
-- This is especially important when `encrypt.enable = off` is used in logical replication or apply workflows, because blind indexes avoid dependence on session key availability.
+**Upgrading to v4.0:**
+
+v4.0 removes all deprecated functions. You must migrate through v3.3 first:
+
+```sql
+-- Step 1: Upgrade to v3.3 (deprecation release)
+ALTER EXTENSION column_encrypt UPDATE TO '3.3';
+
+-- Step 2: Update your code to use encrypt.* API (see MIGRATION.md)
+
+-- Step 3: Upgrade to v4.0
+ALTER EXTENSION column_encrypt UPDATE TO '4.0';
+```
+
+See [MIGRATION.md](MIGRATION.md) for the complete migration guide.
+
+**General notes:**
+
+- After upgrading from v2.x, rebuild any existing hash indexes on `encrypted_text` or `encrypted_bytea` columns.
+- For scalable equality lookups, prefer a companion blind-index column instead of direct encrypted-column hash indexing.
 
 ---
 
@@ -172,23 +187,19 @@ After installation, the following GUC parameters are available (see [GUC Paramet
 
 ### Step 1 — Register the encryption key
 
-Connect as a superuser and register your Data Encryption Key (DEK) wrapped by a master passphrase (KEK). Disable query logging first to prevent the passphrase from appearing in logs:
-
-> **Note:** `'my-secret-data-key'` is an **example key value** (not an algorithm name). The second argument `'aes'` specifies the encryption algorithm.
+Connect as a user with `column_encrypt_user` role and register your Data Encryption Key (DEK) wrapped by a master passphrase (KEK). Log masking is automatic:
 
 ```sql
-SELECT cipher_key_disable_log();
-SELECT register_cipher_key('my-secret-data-key', 'aes', 'my-master-passphrase');
-SELECT cipher_key_enable_log();
+-- Log masking is automatic, no ceremony needed
+SELECT encrypt.register_key('my-secret-data-key', 'my-master-passphrase');
 ```
 
 ### Step 2 — Load the key in your session
 
-In each new session, load the DEK into session memory before accessing encrypted columns. Only roles granted `column_encrypt_runtime` should be allowed to do this. Always call `cipher_key_disable_log()` first to prevent the passphrase from appearing in logs:
+In each new session, load the DEK into session memory before accessing encrypted columns:
 
 ```sql
-SELECT cipher_key_disable_log();
-SELECT load_key('my-master-passphrase');
+SELECT encrypt.load_key('my-master-passphrase');
 ```
 
 ### Step 3 — Create a table with encrypted columns and insert data
@@ -224,58 +235,31 @@ This is the expected result — without loading the key, the ciphertext cannot b
 ### Step 6 — Attempt to load a wrong key
 
 ```sql
-test=# SELECT cipher_key_disable_log();
- cipher_key_disable_log
-------------------------
- t
-(1 row)
-
-test=# SELECT load_key('wrong-passphrase');
-ERROR:  EDB-ENC0012 cipher key is not correct
+test=# SELECT encrypt.load_key('wrong-passphrase');
+ERROR:  EDB-ENC0012: incorrect decryption key
 ```
 
 This is also expected — an incorrect passphrase is rejected.
 
 ---
 
-## Functions Reference
+## Functions Reference (v4.0 API)
+
+All encryption functions are in the `encrypt` schema:
 
 | Function | Returns | Description |
 |---|---|---|
-| `register_cipher_key(data_key text, algorithm text, master_passphrase text)` | `integer` | Wraps the DEK with the KEK (master passphrase) using AES-256/S2K and stores it in `cipher_key_table`. |
-| `load_key(master_passphrase text)` | `boolean` | Decrypts the active DEK from `cipher_key_table` using the master passphrase and loads it into session memory. |
-| `load_key_by_version(master_passphrase text, key_version integer)` | `boolean` | Loads a specific stored key version into the session keyring. |
-| `loaded_cipher_key_versions()` | `integer[]` | Returns the key versions currently loaded into the backend session keyring, without exposing key material. |
-| `cipher_key_disable_log()` | `boolean` | Disables `track_activities` before sensitive key operations. |
-| `cipher_key_enable_log()` | `boolean` | Re-enables `track_activities` after sensitive key operations. |
-| `enc_store_key(key text, algorithm text)` | `boolean` | Low-level helper that stores a DEK in session memory under the current `encrypt.key_version`. |
-| `enc_store_prv_key(key text, algorithm text)` | `boolean` | Deprecated compatibility alias for `enc_store_key(...)`; it no longer stores a distinct “previous” version. |
-| `enc_rm_key()` | `boolean` | Securely removes all loaded DEKs from session memory (zeroes the key bytes). |
-| `enc_rm_prv_key()` | `boolean` | Compatibility alias for clearing the loaded keyring. |
-| `cipher_key_reencrypt_data(schema text, table text, column text)` | `bigint` | Re-encrypts all values in the specified encrypted column by decrypting with the ciphertext header version and re-encrypting with the current `encrypt.key_version`. Returns the number of rows re-encrypted. |
-| `cipher_key_reencrypt_data_batch(schema text, table text, column text, batch_size integer)` | `bigint` | Re-encrypts a bounded batch of rows at a time so callers can rotate large tables incrementally. |
-| `activate_cipher_key(key_version integer)` | `boolean` | Marks one registered key version as active and retires the previously active version. |
-| `revoke_cipher_key(key_version integer)` | `boolean` | Marks a stored key version as revoked so it can no longer be loaded. |
-| `cipher_key_versions()` | `setof record` | Lists registered key versions with metadata including usage statistics (`last_used_at`, `use_count`). |
-| `cipher_verify_column_encryption(schema text, table text, column text, sample_size integer DEFAULT 1000)` | `setof record` | Verifies that data in an encrypted column can be decrypted with currently loaded keys. |
-| `column_encrypt_blind_index_text(plaintext text, blind_index_key text)` | `text` | Returns a SHA-256 HMAC blind index for companion lookup columns. |
-| `column_encrypt_blind_index_bytea(plaintext bytea, blind_index_key text)` | `text` | Returns a SHA-256 HMAC blind index for binary payloads. |
-| `cipher_key_logical_replication_check(schema text, table text)` | `setof record` | Returns local readiness checks and warnings for logical replication of encrypted tables. |
-| `cipher_key_check_expired()` | `setof record` | Returns all non-revoked keys that have passed their expiration time. |
-| `cipher_key_audit_log_view(limit integer, key_version integer)` | `setof record` | Returns recent audit log entries for key management operations. |
-| `is_key_loaded()` | `boolean` | Returns true if at least one encryption key is loaded in the session. |
-| `cipher_encryption_stats()` | `setof record` | Returns statistics about all encrypted columns including row counts and key versions in use. |
-| `cipher_key_usage_stats()` | `setof record` | Returns usage statistics for each registered key version. |
-| `cipher_metrics()` | `setof record` | Returns encryption metrics in a format suitable for Prometheus/monitoring systems. |
-| `cipher_coverage_audit(schema text)` | `setof record` | Audits the database for potentially sensitive columns that may need encryption. |
-| `cipher_coverage_summary(schema text)` | `setof record` | Returns a summary of encryption coverage by classification category. |
-| `cipher_start_rotation_job(...)` | `bigint` | Creates a new key rotation job with progress tracking. |
-| `cipher_process_rotation_batch(job_id bigint)` | `bigint` | Processes one batch of rows for a rotation job. |
-| `cipher_run_rotation_job(job_id bigint)` | `bigint` | Runs a rotation job to completion. |
-| `cipher_pause_rotation_job(job_id bigint)` | `boolean` | Pauses a running rotation job. |
-| `cipher_resume_rotation_job(job_id bigint)` | `boolean` | Resumes a paused rotation job. |
-| `cipher_cancel_rotation_job(job_id bigint)` | `boolean` | Cancels a rotation job. |
-| `cipher_rotation_progress()` | `setof record` | Returns current progress of all rotation jobs. |
+| `encrypt.register_key(dek text, passphrase text, activate boolean DEFAULT true)` | `integer` | Wraps the DEK with the passphrase using AES-256/S2K and stores it. Returns the assigned key_id. |
+| `encrypt.load_key(passphrase text, all_versions boolean DEFAULT false)` | `boolean` | Loads key(s) into session memory. Use `all_versions => true` during rotation. |
+| `encrypt.unload_key()` | `void` | Securely removes all loaded keys from session memory. |
+| `encrypt.activate_key(key_id integer)` | `boolean` | Sets a key as active for new encryptions (retires previous active key). |
+| `encrypt.revoke_key(key_id integer)` | `boolean` | Prevents a key from being loaded. |
+| `encrypt.rotate(schema text, table text, column text, batch_size integer DEFAULT NULL)` | `bigint` | Re-encrypts data with the active key. Returns rows processed. |
+| `encrypt.verify(schema text, table text, column text, sample_size integer DEFAULT 1000)` | `setof record` | Verifies encryption integrity by sampling rows. |
+| `encrypt.keys()` | `setof record` | Lists all registered keys with state and metadata. |
+| `encrypt.status()` | `record` | Returns quick status: key_loaded, active_key_version, encrypted_column_count. |
+| `encrypt.blind_index(value text, hmac_key text)` | `text` | Returns a SHA-256 HMAC blind index for searchable lookups. |
+| `loaded_cipher_key_versions()` | `integer[]` | Returns key versions currently loaded in session (metadata only). |
 
 ---
 
@@ -295,171 +279,66 @@ All parameters require **superuser** (`PGC_SUSET`) to change.
 ## Security Model
 
 - **`cipher_key_table`** stores versioned wrapped keys, activation metadata, and timestamps. Direct table access is revoked from `PUBLIC`.
-- Administrative key operations use **`SECURITY DEFINER`**, but execution is no longer granted to `PUBLIC`.
-- `column_encrypt_admin` owns registration, activation, revocation, re-encryption, and operational logging controls.
-- `column_encrypt_runtime` is intended for application roles that are allowed to load keys and clear their session keyring. If you want to prevent most application roles from loading keys, do not grant this role broadly.
-- `column_encrypt_reader` is intended for read-only metadata and replication-readiness inspection.
+- All `encrypt.*` functions use **`SECURITY DEFINER`** and are revoked from `PUBLIC`.
+- **`column_encrypt_user`** is the single role for all encryption operations (key management, loading, rotation).
 - **`encrypt.enable`** is `PGC_SUSET` — only superusers can enable or disable encryption. This prevents unprivileged users from bypassing encryption by toggling the GUC.
-- Low-level helper functions such as `enc_store_key`, `enc_store_prv_key`, and `pgstat_actv_mask` are revoked from `PUBLIC`.
 - Encryption keys stored in C session memory are **zeroed with `secure_memset`** when removed, preventing key material from lingering in process memory.
-- The **`emit_log_hook`** only targets known sensitive key-management function calls, and its redaction runs after earlier hooks so masking remains the final step. It is a defense-in-depth measure, not a substitute for cautious operational handling of passphrases.
-- `loaded_cipher_key_versions()` is safe to grant to runtime roles because it reveals version metadata only, not DEKs or passphrases.
+- The **`emit_log_hook`** automatically masks known sensitive key-management function calls in PostgreSQL logs. This is a defense-in-depth measure, not a substitute for cautious operational handling of passphrases.
+- `loaded_cipher_key_versions()` reveals version metadata only, not DEKs or passphrases.
 
 Example grants:
 
 ```sql
-GRANT column_encrypt_admin TO security_admin;
-GRANT column_encrypt_runtime TO app_runtime;
-GRANT column_encrypt_reader TO audit_reader;
+-- Grant encryption privileges to application roles
+GRANT column_encrypt_user TO app_user;
+GRANT column_encrypt_user TO key_manager;
 ```
 
 ### Key Encryption Key (KEK) vs Data Encryption Key (DEK)
 
 | Key | Role | Storage |
 |---|---|---|
-| **Data Encryption Key (DEK)** | Encrypts/decrypts column data | Stored wrapped (encrypted) in `cipher_key_table`; loaded into session memory on `load_key()` |
+| **Data Encryption Key (DEK)** | Encrypts/decrypts column data | Stored wrapped (encrypted) in `cipher_key_table`; loaded into session memory on `encrypt.load_key()` |
 | **Key Encryption Key (KEK) / Master Passphrase** | Wraps the DEK before storage | Never stored in the database; managed externally |
 
-`register_cipher_key()` encrypts the DEK with the master passphrase using **AES-256 with iterated-salted S2K** (`cipher-algo=aes256, s2k-mode=3`) via `pgcrypto`'s `pgp_sym_encrypt`. `load_key()` reverses this with `pgp_sym_decrypt`.
+`encrypt.register_key()` encrypts the DEK with the passphrase using **AES-256 with iterated-salted S2K** (`cipher-algo=aes256, s2k-mode=3`) via `pgcrypto`'s `pgp_sym_encrypt`. `encrypt.load_key()` reverses this with `pgp_sym_decrypt`.
 
 ---
 
 ## Key Rotation
 
-To rotate the encryption key, follow these steps in a single superuser session:
+To rotate the encryption key, follow these steps:
 
 ```sql
--- Step 1: Disable logging and register the next key version as pending
-SELECT cipher_key_disable_log();
-SELECT register_cipher_key('new-data-key', 'aes', 'my-master-passphrase', 2, false);
+-- Step 1: Register a new key version (inactive by default)
+SELECT encrypt.register_key('new-data-key', 'my-master-passphrase', false);
 
--- Step 2: Load both versions into the session keyring
-SELECT load_key_by_version('my-master-passphrase', 1);
-SELECT load_key_by_version('my-master-passphrase', 2);
+-- Step 2: Load all key versions for rotation
+SELECT encrypt.load_key('my-master-passphrase', all_versions => true);
+
+-- Step 3: Activate the new version for new encryptions
+SELECT encrypt.activate_key(2);
+
+-- Step 4: Set the target key version and re-encrypt
 SET encrypt.key_version = 2;
+SELECT encrypt.rotate('public', 'secure_data', 'ssn');
 
--- Step 3: Re-encrypt all data in the encrypted column
-SELECT cipher_key_reencrypt_data('public', 'secure_data', 'ssn');
-
--- Or rotate incrementally in batches for large tables
-SELECT cipher_key_reencrypt_data_batch('public', 'secure_data', 'ssn', 5000);
-
--- Step 4: Activate the new version
-SELECT activate_cipher_key(2);
+-- Or rotate in batches for large tables
+DO $$
+DECLARE moved bigint;
+BEGIN
+    LOOP
+        moved := encrypt.rotate('public', 'secure_data', 'ssn', 5000);
+        EXIT WHEN moved = 0;
+    END LOOP;
+END;
+$$;
 
 -- Step 5: Clear the session keyring
-SELECT enc_rm_key();
-SELECT cipher_key_enable_log();
+SELECT encrypt.unload_key();
 ```
 
-After rotation, all new sessions must call `load_key('my-master-passphrase')` to use the active key version.
-
-### Online Key Rotation with Progress Tracking (v3.1+)
-
-For large tables, use the job-based rotation system that provides progress tracking, pause/resume, and throttling:
-
-```sql
--- Step 1: Register and load the new key version
-SELECT cipher_key_disable_log();
-SELECT register_cipher_key('new-data-key', 'aes', 'my-master-passphrase', 2, false);
-SELECT load_key_by_version('my-master-passphrase', 1);
-SELECT load_key_by_version('my-master-passphrase', 2);
-SELECT cipher_key_enable_log();
-
--- Step 2: Start a rotation job with progress tracking
-SET encrypt.key_version = 2;
-SELECT cipher_start_rotation_job(
-    'public',           -- schema
-    'large_table',      -- table
-    'encrypted_col',    -- column
-    2,                  -- target key version
-    5000,               -- batch size
-    50                  -- throttle (ms between batches)
-);
-
--- Step 3: Monitor progress
-SELECT * FROM cipher_rotation_progress();
--- job_id | table      | progress | rows_done | total | eta    | status
--- 1      | large_table| 45%      | 450000    | 1M    | 30 min | running
-
--- Step 4: Pause during peak hours if needed
-SELECT cipher_pause_rotation_job(1);
-
--- Step 5: Resume when ready
-SELECT cipher_resume_rotation_job(1);
-
--- Step 6: Or run to completion in one call
-SELECT cipher_run_rotation_job(1);
-
--- Step 7: Activate the new key after rotation completes
-SELECT activate_cipher_key(2);
-```
-
----
-
-## Production Operations (v3.1+)
-
-### Encryption Statistics
-
-View all encrypted columns in your database with their key version distribution:
-
-```sql
-SELECT * FROM cipher_encryption_stats();
--- schema | table   | column | row_count | key_versions | needs_rotation
--- public | users   | ssn    | 50000     | {1,2}        | true
--- public | orders  | card   | 1000000   | {2}          | false
-```
-
-### Key Usage Statistics
-
-See which key versions are in use across the database:
-
-```sql
-SELECT * FROM cipher_key_usage_stats();
--- key_version | key_state | tables_using | row_count | is_current
--- 1           | retired   | 2            | 25000     | false
--- 2           | active    | 5            | 1025000   | true
-```
-
-### Monitoring Metrics
-
-Export metrics for Prometheus/Grafana integration:
-
-```sql
-SELECT * FROM cipher_metrics();
--- metric_name                       | metric_value | metric_labels
--- column_encrypt_columns_total      | 12           | {}
--- column_encrypt_keys_total         | 3            | {"state": "active"}
--- column_encrypt_keys_expiring_30d  | 1            | {}
--- column_encrypt_session_key_loaded | 1            | {}
-```
-
-### Encryption Coverage Audit
-
-Discover potentially sensitive columns that should be encrypted:
-
-```sql
-SELECT * FROM cipher_coverage_audit();
--- schema | table  | column      | classification | encrypted | recommendation
--- public | users  | ssn         | PII-HIGH       | NO        | ENCRYPT
--- public | users  | email       | PII-MEDIUM     | NO        | CONSIDER
--- public | cards  | card_number | PCI            | NO        | ENCRYPT
--- public | users  | secret_key  | ENCRYPTED      | YES       | OK
-
--- Get a summary by classification
-SELECT * FROM cipher_coverage_summary();
--- classification | total | encrypted | unencrypted | coverage_pct
--- PCI            | 2     | 1         | 1           | 50.0
--- PII-HIGH       | 3     | 2         | 1           | 66.7
-```
-
-The audit detects columns based on naming patterns:
-- **PII-HIGH**: `ssn`, `social_security`, `tax_id`, `passport`, etc.
-- **PCI**: `card_number`, `credit_card`, `cvv`, `pan`, etc.
-- **SECRET**: `password`, `api_key`, `secret`, `token`, etc.
-- **HIPAA**: `diagnosis`, `prescription`, `medical`, etc.
-- **PII-MEDIUM**: `email`, `phone`, `address`, `dob`, etc.
-- **FINANCIAL**: `salary`, `income`, `bank_account`, etc.
+After rotation, all new sessions must call `encrypt.load_key('my-master-passphrase')` to use the active key version.
 
 ---
 
@@ -472,16 +351,7 @@ The audit detects columns based on naming patterns:
 - wrapped keys in `cipher_key_table` are not replicated as usable session keys
 - replication/apply roles should run with `encrypt.enable = off` so replication transports ciphertext rather than decrypted plaintext
 
-Use the built-in readiness helper before publishing encrypted tables:
-
-```sql
-SELECT *
-FROM cipher_key_logical_replication_check('public', 'secure_data');
-```
-
-This highlights local issues such as `wal_level`, encrypted columns, and replica identity usage.
-
-For local end-to-end testing, the branch also includes a Docker-based logical replication harness so publisher/subscriber behavior can be exercised beyond the static readiness helper.
+For local end-to-end testing, use the Docker-based logical replication harness to exercise publisher/subscriber behavior.
 
 ## Blind Indexing
 
@@ -494,7 +364,7 @@ Example:
 ALTER TABLE secure_data ADD COLUMN ssn_blind_index text;
 
 UPDATE secure_data
-SET ssn_blind_index = column_encrypt_blind_index_text('888-999-2045', 'blind-index-secret');
+SET ssn_blind_index = encrypt.blind_index('888-999-2045', 'blind-index-secret');
 ```
 
 The blind-index key should be managed separately from the DEK/KEK used for encryption.
@@ -509,7 +379,7 @@ Recommended pattern:
 
 - Use a dedicated publisher-side replication user with `ALTER ROLE ... SET encrypt.enable = off` so logical decoding emits raw ciphertext instead of decrypted plaintext.
 - Use a dedicated subscriber-side subscription owner/apply-worker role with `ALTER ROLE ... SET encrypt.enable = off` so replicated ciphertext is stored directly without requiring a backend-local loaded key.
-- Keep normal application sessions on the default `encrypt.enable = on` path and load keys only in roles that were explicitly granted `column_encrypt_runtime`.
+- Keep normal application sessions on the default `encrypt.enable = on` path and load keys only in roles that were explicitly granted `column_encrypt_user`.
 - Load the key only in interactive/application sessions that need to read decrypted values; replication workers should replicate ciphertext, not plaintext.
 
 Run the local integration harness:
@@ -526,15 +396,13 @@ Files involved:
 
 ## Supported Algorithms
 
-The extension supports any symmetric cipher algorithm accepted by `pgcrypto`'s `encrypt()` and `decrypt()` functions. The algorithm name is passed as the second argument to `register_cipher_key()` and `enc_store_key()`.
+The extension uses AES encryption via `pgcrypto`.
 
-Currently validated algorithm:
-
-| Algorithm | Value |
+| Algorithm | Description |
 |---|---|
-| AES (Advanced Encryption Standard) | `aes` |
+| AES-256 | Advanced Encryption Standard with 256-bit key |
 
-> **Note:** The `register_cipher_key()` function validates that the algorithm is `aes`. The DEK is always wrapped using AES-256/S2K regardless of the column encryption algorithm.
+The DEK is wrapped using AES-256/S2K (iterated-salted string-to-key) via `pgp_sym_encrypt`.
 
 ---
 
