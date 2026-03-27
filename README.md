@@ -1,7 +1,9 @@
 # column_encrypt
 
+[![CI](https://github.com/vibhorkum/column_encrypt/actions/workflows/ci.yml/badge.svg)](https://github.com/vibhorkum/column_encrypt/actions/workflows/ci.yml)
 [![License: PostgreSQL](https://img.shields.io/badge/License-PostgreSQL-blue.svg)](LICENSE)
 [![Language: PLpgSQL + C](https://img.shields.io/badge/Language-PLpgSQL%20%2B%20C-informational.svg)](#architecture)
+[![PostgreSQL: 14-18](https://img.shields.io/badge/PostgreSQL-14--18-336791.svg)](https://www.postgresql.org/)
 
 ## Table of Contents
 
@@ -48,7 +50,7 @@
 
 ## Requirements
 
-- **PostgreSQL** (built with standard PGXS; compatible with PostgreSQL 10 and later)
+- **PostgreSQL 14 or later** (tested with PostgreSQL 14, 15, 16, 17, and 18)
 - **`pgcrypto`** extension (listed as a dependency in `column_encrypt.control` and auto-installed if not already present)
 - A **C compiler** and **PostgreSQL development headers** (`postgresql-devel` on RPM-based systems, `libpq-dev` / `postgresql-server-dev-*` on Debian/Ubuntu)
 
@@ -143,9 +145,11 @@ Run the local regression harness against PostgreSQL 18:
 ./run-docker-regression.sh
 ```
 
-Run against a specific supported version:
+Run against a specific supported version (14, 15, 16, 17, or 18):
 
 ```bash
+./run-docker-regression.sh 14
+./run-docker-regression.sh 15
 ./run-docker-regression.sh 16
 ./run-docker-regression.sh 17
 ./run-docker-regression.sh 18
@@ -254,8 +258,8 @@ All encryption functions are in the `encrypt` schema:
 | `encrypt.unload_key()` | `void` | Securely removes all loaded keys from session memory. |
 | `encrypt.activate_key(key_id integer)` | `boolean` | Sets a key as active for new encryptions (retires previous active key). |
 | `encrypt.revoke_key(key_id integer)` | `boolean` | Prevents a key from being loaded. |
-| `encrypt.rotate(schema text, table text, column text, batch_size integer DEFAULT NULL)` | `bigint` | Re-encrypts data with the active key. Returns rows processed. |
-| `encrypt.verify(schema text, table text, column text, sample_size integer DEFAULT 1000)` | `setof record` | Verifies encryption integrity by sampling rows. |
+| `encrypt.rotate(schema text, table text, column text, batch_size integer DEFAULT 10000)` | `bigint` | Re-encrypts data with the active key. Returns rows processed. |
+| `encrypt.verify(schema text, table text, column text, sample_size integer DEFAULT 100)` | `setof record` | Verifies encryption integrity by sampling rows. |
 | `encrypt.keys()` | `setof record` | Lists all registered keys with state and metadata. |
 | `encrypt.status()` | `record` | Returns quick status: key_loaded, active_key_version, encrypted_column_count. |
 | `encrypt.blind_index(value text, hmac_key text)` | `text` | Returns a SHA-256 HMAC blind index for searchable lookups. |
