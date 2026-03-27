@@ -695,7 +695,7 @@ GRANT EXECUTE ON FUNCTION encrypt.status() TO column_encrypt_user;
 GRANT EXECUTE ON FUNCTION encrypt.blind_index(TEXT, TEXT) TO column_encrypt_user;
 GRANT EXECUTE ON FUNCTION loaded_cipher_key_versions() TO column_encrypt_user;
 
--- Revoke PUBLIC access to sensitive functions
+-- Revoke PUBLIC access to encrypt schema functions
 REVOKE EXECUTE ON FUNCTION encrypt.register_key(TEXT, TEXT, BOOLEAN) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION encrypt.load_key(TEXT, BOOLEAN) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION encrypt.unload_key() FROM PUBLIC;
@@ -705,3 +705,4 @@ REVOKE EXECUTE ON FUNCTION encrypt.rotate(TEXT, TEXT, TEXT, INTEGER) FROM PUBLIC
 REVOKE EXECUTE ON FUNCTION encrypt.verify(TEXT, TEXT, TEXT, INTEGER) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION encrypt.keys() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION encrypt.status() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION encrypt.blind_index(TEXT, TEXT) FROM PUBLIC;
