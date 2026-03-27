@@ -240,7 +240,7 @@ jobs:
           # Test basic workflow
           psql -h /tmp -p $PGPORT -d test_v40_fresh \
             -c "CREATE ROLE test_user LOGIN; GRANT column_encrypt_user TO test_user;"
-          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "SET ROLE test_user; SELECT encrypt.register_key('test-key', 'test-pass');" | grep -F '1'
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -c "SET ROLE test_user; SELECT encrypt.register_key('my-32-byte-test-encryption-key!!', 'test-pass');" | grep -F '1'
           psql -h /tmp -p $PGPORT -d test_v40_fresh -c "SET ROLE test_user; SELECT encrypt.load_key('test-pass');" | grep -F 't'
           # Create encrypted data
           psql -h /tmp -p $PGPORT -d test_v40_fresh -c "CREATE TABLE secrets (id serial, data encrypted_text); INSERT INTO secrets(data) VALUES ('secret-value');"
