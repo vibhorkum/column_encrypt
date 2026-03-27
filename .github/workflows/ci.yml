@@ -254,3 +254,64 @@ jobs:
           psql -h /tmp -p $PGPORT -d test_v40_fresh -U test_user -At \
             -c "SELECT encrypt.load_key('test-pass'); SELECT key_loaded FROM encrypt.status();" | grep -Fx 't'
           pg_ctl -D "$PGDATA" stop
+
+      - name: Verify upgrade vs fresh install function parity
+        if: matrix.pg_version == 18
+        run: |
+          export PGDATA=$(mktemp -d)
+          export PGPORT=54326
+          export PGHOST=/tmp
+          initdb --no-locale -E UTF8 "$PGDATA"
+          echo "shared_preload_libraries = 'column_encrypt'" >> "$PGDATA/postgresql.conf"
+          echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
+          echo "port = $PGPORT" >> "$PGDATA/postgresql.conf"
+          pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -w start || \
+            (cat "$PGDATA/postgres.log" && exit 1)
+
+          # Create two databases: one upgraded, one fresh
+          createdb db_upgraded
+          createdb db_fresh
+
+          # Setup upgraded database (3.3 -> 4.0)
+          psql -h /tmp -p $PGPORT -d db_upgraded -c "CREATE EXTENSION pgcrypto;"
+          psql -h /tmp -p $PGPORT -d db_upgraded -c "CREATE EXTENSION column_encrypt VERSION '3.3';"
+          psql -h /tmp -p $PGPORT -d db_upgraded -c "ALTER EXTENSION column_encrypt UPDATE TO '4.0';"
+
+          # Setup fresh database (direct 4.0)
+          psql -h /tmp -p $PGPORT -d db_fresh -c "CREATE EXTENSION pgcrypto;"
+          psql -h /tmp -p $PGPORT -d db_fresh -c "CREATE EXTENSION column_encrypt VERSION '4.0';"
+
+          # Compare function bodies for all encrypt.* functions
+          # Extract prosrc (function source) for each function and compare
+          echo "Comparing encrypt.* function bodies between upgraded and fresh install..."
+
+          FUNCTIONS="register_key load_key unload_key activate_key revoke_key rotate verify keys status blind_index"
+          for func in $FUNCTIONS; do
+            echo "Checking encrypt.$func..."
+
+            UPGRADED=$(psql -h /tmp -p $PGPORT -d db_upgraded -At -c \
+              "SELECT md5(prosrc) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = '$func';")
+
+            FRESH=$(psql -h /tmp -p $PGPORT -d db_fresh -At -c \
+              "SELECT md5(prosrc) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = '$func';")
+
+            if [ "$UPGRADED" != "$FRESH" ]; then
+              echo "MISMATCH: encrypt.$func function body differs!"
+              echo "Upgraded MD5: $UPGRADED"
+              echo "Fresh MD5: $FRESH"
+              echo ""
+              echo "Upgraded source:"
+              psql -h /tmp -p $PGPORT -d db_upgraded -At -c \
+                "SELECT prosrc FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = '$func';"
+              echo ""
+              echo "Fresh source:"
+              psql -h /tmp -p $PGPORT -d db_fresh -At -c \
+                "SELECT prosrc FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = '$func';"
+              pg_ctl -D "$PGDATA" stop
+              exit 1
+            fi
+            echo "  OK: encrypt.$func matches"
+          done
+
+          echo "All encrypt.* function bodies match between upgraded and fresh install!"
+          pg_ctl -D "$PGDATA" stop
