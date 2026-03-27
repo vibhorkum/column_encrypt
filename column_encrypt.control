@@ -1,6 +1,6 @@
 # column_encrypt extension
-comment = 'Encrypted column types for EDB Postgres - production hardened'
-default_version = '3.1'
+comment = 'Transparent column-level encryption for PostgreSQL'
+default_version = '4.0'
 requires = 'pgcrypto'
 module_pathname = '$libdir/column_encrypt'
 relocatable = false
