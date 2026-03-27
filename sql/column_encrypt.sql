@@ -283,6 +283,9 @@ DROP TABLE test_hash;
 -- =============================================================================
 -- ERROR CASES
 -- =============================================================================
+-- Note: Binary protocol (COPY FORMAT binary, libpq binary mode) is blocked
+-- at the C level with error "binary protocol is not supported for encrypted types".
+-- This cannot be tested in regression because COPY TO STDOUT doesn't work in PL/pgSQL.
 
 -- encrypt.rotate with encrypt.enable=off should fail
 SET encrypt.enable = off;

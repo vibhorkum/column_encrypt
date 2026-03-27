@@ -226,11 +226,12 @@ BEGIN
                 v_count := v_count + 1;
             EXCEPTION WHEN OTHERS THEN
                 PERFORM enc_rm_key();
-                -- Restore previous GUC value
+                -- Restore previous GUC value (encrypt.key_version is INTEGER with min=1)
                 IF v_prev_key_version IS NOT NULL AND v_prev_key_version <> '' THEN
                     PERFORM set_config('encrypt.key_version', v_prev_key_version, false);
                 ELSE
-                    PERFORM set_config('encrypt.key_version', '', false);
+                    -- Reset to default (1) since empty string is invalid for integer GUC
+                    EXECUTE 'RESET encrypt.key_version';
                 END IF;
                 RAISE EXCEPTION 'failed to decrypt key version %', v_key_version
                     USING ERRCODE = 'invalid_password';
@@ -262,11 +263,12 @@ BEGIN
             v_count := 1;
         EXCEPTION WHEN OTHERS THEN
             PERFORM enc_rm_key();
-            -- Restore previous GUC value
+            -- Restore previous GUC value (encrypt.key_version is INTEGER with min=1)
             IF v_prev_key_version IS NOT NULL AND v_prev_key_version <> '' THEN
                 PERFORM set_config('encrypt.key_version', v_prev_key_version, false);
             ELSE
-                PERFORM set_config('encrypt.key_version', '', false);
+                -- Reset to default (1) since empty string is invalid for integer GUC
+                EXECUTE 'RESET encrypt.key_version';
             END IF;
             RAISE EXCEPTION 'incorrect passphrase'
                 USING ERRCODE = 'invalid_password';
