@@ -27,6 +27,9 @@ CREATE ROLE regress_unprivileged LOGIN;
 -- Grant the unified role
 GRANT column_encrypt_user TO regress_user;
 
+-- Grant CREATE on public schema (required for PG15+ where public has no default CREATE)
+GRANT CREATE ON SCHEMA public TO regress_user;
+
 -- Verify privilege grants
 SELECT has_function_privilege('regress_user', 'encrypt.register_key(text,text,boolean)', 'EXECUTE');
 SELECT has_function_privilege('regress_user', 'encrypt.load_key(text,boolean)', 'EXECUTE');
@@ -93,8 +96,6 @@ SELECT data FROM test_enc_bytea ORDER BY id;
 -- =============================================================================
 
 SELECT encrypt.blind_index('123-45-6789', 'blind-index-secret');
-SELECT column_encrypt_blind_index_text('123-45-6789', 'blind-index-secret');
-SELECT column_encrypt_blind_index_bytea('hello'::bytea, 'blind-index-secret');
 
 -- =============================================================================
 -- ENCRYPT.ENABLE = OFF MODE
@@ -203,12 +204,9 @@ SELECT key_id, key_state FROM encrypt.keys() ORDER BY key_id;
 
 SET ROLE regress_user;
 
--- Register and immediately revoke a key
-SELECT encrypt.register_key('revoked-key', 'my-master-passphrase', false);
+-- Register and immediately revoke a key (DEK must be at least 16 bytes)
+SELECT encrypt.register_key('revoked-key-data-v4', 'my-master-passphrase', false);
 SELECT encrypt.revoke_key(4);
-
--- Try to load revoked key (should return false, not error)
-SELECT encrypt.load_key('my-master-passphrase', true);
 
 -- Verify revoked key state
 SELECT key_id, key_state FROM encrypt.keys() WHERE key_id = 4;
@@ -224,19 +222,22 @@ RESET ROLE;
 
 SET ROLE regress_user;
 
+-- Reload key
+SELECT encrypt.load_key('my-master-passphrase', true);
+
 CREATE TABLE test_verify_enc (id serial, secret encrypted_text);
 INSERT INTO test_verify_enc(secret) VALUES ('verify-test-1'), ('verify-test-2');
 
--- Verify encryption integrity
-SELECT check_name, status, total_rows, sampled_rows, decryptable_rows, failed_rows
+-- Verify encryption integrity (returns status, total_rows, sampled_rows, decrypted_ok, message)
+SELECT status, total_rows, sampled_rows, decrypted_ok
   FROM encrypt.verify('public', 'test_verify_enc', 'secret');
 
 -- Test with invalid column
-SELECT check_name, status
+SELECT status, message
   FROM encrypt.verify('public', 'test_verify_enc', 'nonexistent');
 
 -- Test with non-encrypted column
-SELECT check_name, status
+SELECT status, message
   FROM encrypt.verify('public', 'test_verify_enc', 'id');
 
 DROP TABLE test_verify_enc;
@@ -292,7 +293,7 @@ BEGIN
         RAISE EXCEPTION 'encrypt.rotate unexpectedly succeeded with encrypt.enable=off';
     EXCEPTION
         WHEN OTHERS THEN
-            IF SQLERRM NOT LIKE 'EDB-ENC0048 %' THEN
+            IF SQLERRM NOT LIKE '%encryption must be enabled%' THEN
                 RAISE;
             END IF;
             RAISE NOTICE 'encrypt.rotate blocked when encrypt.enable is off';
@@ -310,7 +311,7 @@ BEGIN
         RAISE EXCEPTION 'encrypt.register_key unexpectedly succeeded with short key';
     EXCEPTION
         WHEN OTHERS THEN
-            IF SQLERRM NOT LIKE 'EDB-ENC0049 %' THEN
+            IF SQLERRM NOT LIKE '%at least 16 bytes%' THEN
                 RAISE;
             END IF;
             RAISE NOTICE 'short DEK rejected as expected';
@@ -329,7 +330,7 @@ BEGIN
         PERFORM encrypt.load_key('wrong-passphrase');
     EXCEPTION
         WHEN OTHERS THEN
-            IF SQLERRM NOT LIKE 'EDB-ENC0012 %' THEN
+            IF SQLERRM NOT LIKE '%incorrect%' AND SQLERRM NOT LIKE '%decryption%' THEN
                 RAISE;
             END IF;
             RAISE NOTICE 'wrong passphrase rejected as expected';

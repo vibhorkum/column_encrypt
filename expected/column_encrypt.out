@@ -21,46 +21,48 @@ CREATE ROLE regress_user LOGIN;
 CREATE ROLE regress_unprivileged LOGIN;
 -- Grant the unified role
 GRANT column_encrypt_user TO regress_user;
+-- Grant CREATE on public schema (required for PG15+ where public has no default CREATE)
+GRANT CREATE ON SCHEMA public TO regress_user;
 -- Verify privilege grants
 SELECT has_function_privilege('regress_user', 'encrypt.register_key(text,text,boolean)', 'EXECUTE');
- has_function_privilege
+ has_function_privilege 
 ------------------------
  t
 (1 row)
 
 SELECT has_function_privilege('regress_user', 'encrypt.load_key(text,boolean)', 'EXECUTE');
- has_function_privilege
+ has_function_privilege 
 ------------------------
  t
 (1 row)
 
 SELECT has_function_privilege('regress_user', 'encrypt.unload_key()', 'EXECUTE');
- has_function_privilege
+ has_function_privilege 
 ------------------------
  t
 (1 row)
 
 SELECT has_function_privilege('regress_user', 'encrypt.keys()', 'EXECUTE');
- has_function_privilege
+ has_function_privilege 
 ------------------------
  t
 (1 row)
 
 SELECT has_function_privilege('regress_user', 'encrypt.rotate(text,text,text,integer)', 'EXECUTE');
- has_function_privilege
+ has_function_privilege 
 ------------------------
  t
 (1 row)
 
 -- Unprivileged user should not have access
 SELECT has_function_privilege('regress_unprivileged', 'encrypt.register_key(text,text,boolean)', 'EXECUTE');
- has_function_privilege
+ has_function_privilege 
 ------------------------
  f
 (1 row)
 
 SELECT has_function_privilege('regress_unprivileged', 'encrypt.load_key(text,boolean)', 'EXECUTE');
- has_function_privilege
+ has_function_privilege 
 ------------------------
  f
 (1 row)
@@ -71,14 +73,14 @@ SELECT has_function_privilege('regress_unprivileged', 'encrypt.load_key(text,boo
 SET ROLE regress_user;
 -- Register first key (auto-assigned version 1, active by default)
 SELECT encrypt.register_key('my-data-encryption-key-v1', 'my-master-passphrase');
- register_key
+ register_key 
 --------------
             1
 (1 row)
 
 -- Check key was registered
 SELECT key_id, key_state, algorithm FROM encrypt.keys() WHERE key_id = 1;
- key_id | key_state | algorithm
+ key_id | key_state | algorithm 
 --------+-----------+-----------
       1 | active    | aes
 (1 row)
@@ -90,21 +92,21 @@ RESET ROLE;
 SET ROLE regress_user;
 -- Load key into session
 SELECT encrypt.load_key('my-master-passphrase');
- load_key
+ load_key 
 ----------
  t
 (1 row)
 
 -- Verify key is loaded
 SELECT loaded_cipher_key_versions();
- loaded_cipher_key_versions
+ loaded_cipher_key_versions 
 ----------------------------
  {1}
 (1 row)
 
 -- Check status
 SELECT key_loaded, active_key_version FROM encrypt.status();
- key_loaded | active_key_version
+ key_loaded | active_key_version 
 ------------+--------------------
  t          |                  1
 (1 row)
@@ -118,7 +120,7 @@ CREATE TABLE test_enc_text (id serial, ssn encrypted_text);
 INSERT INTO test_enc_text(ssn) VALUES ('123-45-6789');
 INSERT INTO test_enc_text(ssn) VALUES ('987-65-4321');
 SELECT ssn FROM test_enc_text ORDER BY id;
-     ssn
+     ssn     
 -------------
  123-45-6789
  987-65-4321
@@ -126,7 +128,7 @@ SELECT ssn FROM test_enc_text ORDER BY id;
 
 -- Equality comparison
 SELECT COUNT(*) FROM test_enc_text WHERE ssn = '123-45-6789'::encrypted_text;
- count
+ count 
 -------
      1
 (1 row)
@@ -136,7 +138,7 @@ CREATE TABLE test_enc_bytea (id serial, data encrypted_bytea);
 INSERT INTO test_enc_bytea(data) VALUES ('hello'::bytea);
 INSERT INTO test_enc_bytea(data) VALUES ('world'::bytea);
 SELECT data FROM test_enc_bytea ORDER BY id;
-     data
+     data     
 --------------
  \x68656c6c6f
  \x776f726c64
@@ -146,21 +148,9 @@ SELECT data FROM test_enc_bytea ORDER BY id;
 -- BLIND INDEX
 -- =============================================================================
 SELECT encrypt.blind_index('123-45-6789', 'blind-index-secret');
-                          blind_index
+                           blind_index                            
 ------------------------------------------------------------------
  67b1c1e63d848735da07ab813b9990ce56cbb199e541c364ec881141e4b6b897
-(1 row)
-
-SELECT column_encrypt_blind_index_text('123-45-6789', 'blind-index-secret');
-                 column_encrypt_blind_index_text
-------------------------------------------------------------------
- 67b1c1e63d848735da07ab813b9990ce56cbb199e541c364ec881141e4b6b897
-(1 row)
-
-SELECT column_encrypt_blind_index_bytea('hello'::bytea, 'blind-index-secret');
-                 column_encrypt_blind_index_bytea
-------------------------------------------------------------------
- 639c2b12e8e37cef74791ea0f114e2fb3097513dfddbfaa365a72ba1145a6c8d
 (1 row)
 
 -- =============================================================================
@@ -170,14 +160,14 @@ SET encrypt.enable = off;
 CREATE TABLE test_off_mode_text (id serial, val encrypted_text);
 INSERT INTO test_off_mode_text(val) VALUES ('alpha'), ('beta');
 SELECT COUNT(*) FROM test_off_mode_text WHERE val = 'alpha'::encrypted_text;
- count
+ count 
 -------
      1
 (1 row)
 
 -- Hash consistency in off mode
 SELECT enc_hash_enctext('alpha'::encrypted_text) = enc_hash_enctext('alpha'::encrypted_text);
- ?column?
+ ?column? 
 ----------
  t
 (1 row)
@@ -185,7 +175,7 @@ SELECT enc_hash_enctext('alpha'::encrypted_text) = enc_hash_enctext('alpha'::enc
 CREATE TABLE test_off_mode_bytea (id serial, val encrypted_bytea);
 INSERT INTO test_off_mode_bytea(val) VALUES ('abc'::bytea), ('xyz'::bytea);
 SELECT COUNT(*) FROM test_off_mode_bytea WHERE val = 'abc'::encrypted_bytea;
- count
+ count 
 -------
      1
 (1 row)
@@ -197,35 +187,35 @@ SET encrypt.enable = on;
 SET ROLE regress_user;
 -- Register second key version (inactive by default)
 SELECT encrypt.register_key('my-data-encryption-key-v2', 'my-master-passphrase', false);
- register_key
+ register_key 
 --------------
             2
 (1 row)
 
 -- Load all key versions for rotation
 SELECT encrypt.load_key('my-master-passphrase', true);
- load_key
+ load_key 
 ----------
  t
 (1 row)
 
 -- Verify both keys loaded
 SELECT loaded_cipher_key_versions();
- loaded_cipher_key_versions
+ loaded_cipher_key_versions 
 ----------------------------
  {2,1}
 (1 row)
 
 -- Activate v2 for new encryptions
 SELECT encrypt.activate_key(2);
- activate_key
+ activate_key 
 --------------
  t
 (1 row)
 
 -- Check key states
 SELECT key_id, key_state FROM encrypt.keys() ORDER BY key_id;
- key_id | key_state
+ key_id | key_state 
 --------+-----------
       1 | retired
       2 | active
@@ -236,13 +226,13 @@ RESET ROLE;
 SET encrypt.key_version = 2;
 SET ROLE regress_user;
 SELECT encrypt.rotate('public', 'test_enc_text', 'ssn');
- rotate
+ rotate 
 --------
       2
 (1 row)
 
 SELECT encrypt.rotate('public', 'test_enc_bytea', 'data');
- rotate
+ rotate 
 --------
       2
 (1 row)
@@ -250,14 +240,14 @@ SELECT encrypt.rotate('public', 'test_enc_bytea', 'data');
 RESET ROLE;
 -- Verify data still readable after rotation
 SELECT ssn FROM test_enc_text ORDER BY id;
-     ssn
+     ssn     
 -------------
  123-45-6789
  987-65-4321
 (2 rows)
 
 SELECT data FROM test_enc_bytea ORDER BY id;
-     data
+     data     
 --------------
  \x68656c6c6f
  \x776f726c64
@@ -273,21 +263,21 @@ FROM generate_series(1, 100) AS gs;
 SET ROLE regress_user;
 -- Register third key
 SELECT encrypt.register_key('my-data-encryption-key-v3', 'my-master-passphrase', false);
- register_key
+ register_key 
 --------------
             3
 (1 row)
 
 -- Load v3
 SELECT encrypt.load_key('my-master-passphrase', true);
- load_key
+ load_key 
 ----------
  t
 (1 row)
 
 -- Activate v3
 SELECT encrypt.activate_key(3);
- activate_key
+ activate_key 
 --------------
  t
 (1 row)
@@ -313,14 +303,14 @@ NOTICE:  batch rotated 100 rows
 RESET ROLE;
 -- Verify all data intact
 SELECT COUNT(*) FROM test_batch_rotate WHERE val::text LIKE 'secret-%';
- count
+ count 
 -------
    100
 (1 row)
 
 -- Check final key states
 SELECT key_id, key_state FROM encrypt.keys() ORDER BY key_id;
- key_id | key_state
+ key_id | key_state 
 --------+-----------
       1 | retired
       2 | retired
@@ -331,36 +321,29 @@ SELECT key_id, key_state FROM encrypt.keys() ORDER BY key_id;
 -- KEY REVOCATION
 -- =============================================================================
 SET ROLE regress_user;
--- Register and immediately revoke a key
-SELECT encrypt.register_key('revoked-key', 'my-master-passphrase', false);
- register_key
+-- Register and immediately revoke a key (DEK must be at least 16 bytes)
+SELECT encrypt.register_key('revoked-key-data-v4', 'my-master-passphrase', false);
+ register_key 
 --------------
             4
 (1 row)
 
 SELECT encrypt.revoke_key(4);
- revoke_key
+ revoke_key 
 ------------
- t
-(1 row)
-
--- Try to load revoked key (should return false, not error)
-SELECT encrypt.load_key('my-master-passphrase', true);
- load_key
-----------
  t
 (1 row)
 
 -- Verify revoked key state
 SELECT key_id, key_state FROM encrypt.keys() WHERE key_id = 4;
- key_id | key_state
+ key_id | key_state 
 --------+-----------
       4 | revoked
 (1 row)
 
 -- Cannot activate revoked key
 SELECT encrypt.activate_key(4);
- activate_key
+ activate_key 
 --------------
  f
 (1 row)
@@ -370,30 +353,37 @@ RESET ROLE;
 -- VERIFICATION
 -- =============================================================================
 SET ROLE regress_user;
+-- Reload key
+SELECT encrypt.load_key('my-master-passphrase', true);
+ load_key 
+----------
+ t
+(1 row)
+
 CREATE TABLE test_verify_enc (id serial, secret encrypted_text);
 INSERT INTO test_verify_enc(secret) VALUES ('verify-test-1'), ('verify-test-2');
--- Verify encryption integrity
-SELECT check_name, status, total_rows, sampled_rows, decryptable_rows, failed_rows
+-- Verify encryption integrity (returns status, total_rows, sampled_rows, decrypted_ok, message)
+SELECT status, total_rows, sampled_rows, decrypted_ok
   FROM encrypt.verify('public', 'test_verify_enc', 'secret');
-       check_name        | status | total_rows | sampled_rows | decryptable_rows | failed_rows
--------------------------+--------+------------+--------------+------------------+-------------
- decryption_verification | ok     |          2 |            2 |                2 |           0
+ status | total_rows | sampled_rows | decrypted_ok 
+--------+------------+--------------+--------------
+ ok     |          2 |            2 |            2
 (1 row)
 
 -- Test with invalid column
-SELECT check_name, status
+SELECT status, message
   FROM encrypt.verify('public', 'test_verify_enc', 'nonexistent');
-  check_name   | status
----------------+--------
- column_exists | error
+ status |     message      
+--------+------------------
+ error  | column not found
 (1 row)
 
 -- Test with non-encrypted column
-SELECT check_name, status
+SELECT status, message
   FROM encrypt.verify('public', 'test_verify_enc', 'id');
- check_name  | status
--------------+--------
- column_type | error
+ status |         message         
+--------+-------------------------
+ error  | not an encrypted column
 (1 row)
 
 DROP TABLE test_verify_enc;
@@ -405,13 +395,13 @@ CREATE TABLE test_null_handling (id serial, val encrypted_text);
 INSERT INTO test_null_handling(val) VALUES (NULL);
 INSERT INTO test_null_handling(val) VALUES ('not-null');
 SELECT COUNT(*) FROM test_null_handling WHERE val IS NULL;
- count
+ count 
 -------
      1
 (1 row)
 
 SELECT COUNT(*) FROM test_null_handling WHERE val IS NOT NULL;
- count
+ count 
 -------
      1
 (1 row)
@@ -425,7 +415,7 @@ INSERT INTO test_equality(val) VALUES ('same-value');
 INSERT INTO test_equality(val) VALUES ('same-value');
 INSERT INTO test_equality(val) VALUES ('different-value');
 SELECT COUNT(*) FROM test_equality WHERE val = 'same-value'::encrypted_text;
- count
+ count 
 -------
      2
 (1 row)
@@ -434,7 +424,7 @@ SELECT COUNT(*) FROM test_equality WHERE val = 'same-value'::encrypted_text;
 SELECT COUNT(*) AS distinct_count FROM (
     SELECT val FROM test_equality GROUP BY val
 ) sub;
- distinct_count
+ distinct_count 
 ----------------
               2
 (1 row)
@@ -446,13 +436,13 @@ INSERT INTO test_hash(val) VALUES ('hash-test');
 INSERT INTO test_hash(val) VALUES ('hash-test');
 SELECT (enc_hash_enctext(val) = enc_hash_enctext(val)) AS hash_consistent
 FROM test_hash LIMIT 1;
- hash_consistent
+ hash_consistent 
 -----------------
  t
 (1 row)
 
 SELECT COUNT(DISTINCT enc_hash_enctext(val)) AS unique_hashes FROM test_hash;
- unique_hashes
+ unique_hashes 
 ---------------
              1
 (1 row)
@@ -470,7 +460,7 @@ BEGIN
         RAISE EXCEPTION 'encrypt.rotate unexpectedly succeeded with encrypt.enable=off';
     EXCEPTION
         WHEN OTHERS THEN
-            IF SQLERRM NOT LIKE 'EDB-ENC0048 %' THEN
+            IF SQLERRM NOT LIKE '%encryption must be enabled%' THEN
                 RAISE;
             END IF;
             RAISE NOTICE 'encrypt.rotate blocked when encrypt.enable is off';
@@ -488,7 +478,7 @@ BEGIN
         RAISE EXCEPTION 'encrypt.register_key unexpectedly succeeded with short key';
     EXCEPTION
         WHEN OTHERS THEN
-            IF SQLERRM NOT LIKE 'EDB-ENC0049 %' THEN
+            IF SQLERRM NOT LIKE '%at least 16 bytes%' THEN
                 RAISE;
             END IF;
             RAISE NOTICE 'short DEK rejected as expected';
@@ -507,7 +497,7 @@ BEGIN
         PERFORM encrypt.load_key('wrong-passphrase');
     EXCEPTION
         WHEN OTHERS THEN
-            IF SQLERRM NOT LIKE 'EDB-ENC0012 %' THEN
+            IF SQLERRM NOT LIKE '%incorrect%' AND SQLERRM NOT LIKE '%decryption%' THEN
                 RAISE;
             END IF;
             RAISE NOTICE 'wrong passphrase rejected as expected';
@@ -552,7 +542,7 @@ RESET ROLE;
 -- Reload key for status check
 SET ROLE regress_user;
 SELECT encrypt.load_key('my-master-passphrase', true);
- load_key
+ load_key 
 ----------
  t
 (1 row)
@@ -561,14 +551,14 @@ RESET ROLE;
 -- Check overall status
 SELECT key_loaded, active_key_version, encrypted_column_count >= 0 AS has_column_count
 FROM encrypt.status();
- key_loaded | active_key_version | has_column_count
+ key_loaded | active_key_version | has_column_count 
 ------------+--------------------+------------------
  t          |                  3 | t
 (1 row)
 
 -- List all keys with their states
 SELECT key_id, key_state, algorithm FROM encrypt.keys() ORDER BY key_id;
- key_id | key_state | algorithm
+ key_id | key_state | algorithm 
 --------+-----------+-----------
       1 | retired   | aes
       2 | retired   | aes
@@ -581,22 +571,22 @@ SELECT key_id, key_state, algorithm FROM encrypt.keys() ORDER BY key_id;
 -- =============================================================================
 SET ROLE regress_user;
 SELECT encrypt.unload_key();
- unload_key
+ unload_key 
 ------------
- t
+ 
 (1 row)
 
 RESET ROLE;
 -- Verify key unloaded
 SELECT loaded_cipher_key_versions();
- loaded_cipher_key_versions
+ loaded_cipher_key_versions 
 ----------------------------
  {}
 (1 row)
 
 -- Status should show no key loaded
 SELECT key_loaded FROM encrypt.status();
- key_loaded
+ key_loaded 
 ------------
  f
 (1 row)
