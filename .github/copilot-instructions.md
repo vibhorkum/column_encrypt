@@ -76,8 +76,7 @@ SELECT encrypt.load_key('passphrase');
 ```sql
 SELECT encrypt.register_key('new-key-32-bytes-for-aes256!!!', 'pass', false);
 SELECT encrypt.load_key('pass', all_versions => true);
-SELECT encrypt.activate_key(2);
-SET encrypt.key_version = 2;
+SELECT encrypt.activate_key(2);  -- Also sets encrypt.key_version internally
 SELECT encrypt.rotate('public', 'table', 'column');
 ```
 

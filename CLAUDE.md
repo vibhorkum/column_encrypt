@@ -99,6 +99,32 @@ When modifying SQL functions:
    - Condition names (e.g., `invalid_password`) may be shown alongside but not instead of codes
    - Reference: https://www.postgresql.org/docs/current/errcodes-appendix.html
 
+### Documentation Rules
+
+1. **Do not document superuser-only GUCs as standard user workflows**:
+   - `encrypt.key_version` and `encrypt.enable` are `PGC_SUSET` (superuser-only)
+   - Prefer SECURITY DEFINER wrapper functions (e.g., `encrypt.activate_key()`) over direct GUC manipulation
+   - If a GUC must be documented, clearly state "requires superuser"
+
+2. **Validate permission model in examples**:
+   - Examples should work for users granted `column_encrypt_user` role
+   - Do not show operations that require privileges beyond the role grants
+
+### Regression Testing Rules
+
+1. **Security-related behavior must always be regression-tested**:
+   - Binary protocol blocking (`col_enc_send_*` raises error)
+   - Permission denials for unprivileged users
+   - Input validation (DEK length, passphrase requirements)
+
+2. **Do not remove regression coverage without equivalent replacement**:
+   - If a comment says "cannot be tested", verify the claim
+   - C-level behavior can often be tested via SQL wrapper functions
+
+3. **Test C extension behavior via SQL wrappers when possible**:
+   - Type send/receive functions can be called directly
+   - Error conditions can be caught in PL/pgSQL exception handlers
+
 ### v4.0 API (encrypt schema)
 
 ```sql

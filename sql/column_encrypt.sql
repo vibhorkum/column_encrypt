@@ -186,12 +186,7 @@ SELECT encrypt.activate_key(2);
 -- Check key states
 SELECT key_id, key_state FROM encrypt.keys() ORDER BY key_id;
 
-RESET ROLE;
-
--- Rotate data to new key version
-SET encrypt.key_version = 2;
-
-SET ROLE regress_user;
+-- Rotate data to new key version (activate_key already set encrypt.key_version)
 SELECT encrypt.rotate('public', 'test_enc_text', 'ssn');
 SELECT encrypt.rotate('public', 'test_enc_bytea', 'data');
 RESET ROLE;
@@ -217,15 +212,10 @@ SELECT encrypt.register_key('my-data-encryption-key-v3', 'my-master-passphrase',
 -- Load v3
 SELECT encrypt.load_key('my-master-passphrase', true);
 
--- Activate v3
+-- Activate v3 (also sets encrypt.key_version)
 SELECT encrypt.activate_key(3);
 
-RESET ROLE;
-
 -- Batch rotation with limit
-SET encrypt.key_version = 3;
-
-SET ROLE regress_user;
 DO $$
 DECLARE
     moved bigint;
@@ -332,9 +322,37 @@ DROP TABLE test_hash;
 -- =============================================================================
 -- ERROR CASES
 -- =============================================================================
--- Note: Binary protocol (COPY FORMAT binary, libpq binary mode) is blocked
--- at the C level with error "binary protocol is not supported for encrypted types".
--- This cannot be tested in regression because COPY TO STDOUT doesn't work in PL/pgSQL.
+
+-- Binary protocol blocking: col_enc_send raises error
+DO $$
+BEGIN
+    BEGIN
+        PERFORM col_enc_send_text('test'::encrypted_text);
+        RAISE EXCEPTION 'col_enc_send_text unexpectedly succeeded';
+    EXCEPTION
+        WHEN feature_not_supported THEN
+            IF SQLERRM NOT LIKE '%binary protocol is not supported%' THEN
+                RAISE;
+            END IF;
+            RAISE NOTICE 'binary protocol blocked for encrypted_text';
+    END;
+END;
+$$;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM col_enc_send_bytea('test'::bytea::encrypted_bytea);
+        RAISE EXCEPTION 'col_enc_send_bytea unexpectedly succeeded';
+    EXCEPTION
+        WHEN feature_not_supported THEN
+            IF SQLERRM NOT LIKE '%binary protocol is not supported%' THEN
+                RAISE;
+            END IF;
+            RAISE NOTICE 'binary protocol blocked for encrypted_bytea';
+    END;
+END;
+$$;
 
 -- encrypt.rotate with encrypt.enable=off should fail
 SET encrypt.enable = off;

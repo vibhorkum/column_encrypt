@@ -320,11 +320,9 @@ SELECT encrypt.register_key('new-data-key', 'my-master-passphrase', false);
 -- Step 2: Load all key versions for rotation
 SELECT encrypt.load_key('my-master-passphrase', all_versions => true);
 
--- Step 3: Activate the new version for new encryptions
+-- Step 3: Activate the new version and re-encrypt
+-- (activate_key sets encrypt.key_version internally)
 SELECT encrypt.activate_key(2);
-
--- Step 4: Set the target key version and re-encrypt
-SET encrypt.key_version = 2;
 SELECT encrypt.rotate('public', 'secure_data', 'ssn');
 
 -- Or rotate in batches for large tables
@@ -338,7 +336,7 @@ BEGIN
 END;
 $$;
 
--- Step 5: Clear the session keyring
+-- Step 4: Clear the session keyring
 SELECT encrypt.unload_key();
 ```
 
