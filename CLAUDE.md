@@ -127,6 +127,18 @@ When modifying SQL functions:
     - STABLE: Catalog lookups OK, same result within transaction
     - VOLATILE: External state changes, non-deterministic results
 
+14. **Functions that modify global key state must handle concurrency**:
+    - `activate_key()` changes which key is active for all sessions
+    - Use `LOCK TABLE ... IN EXCLUSIVE MODE` to serialize concurrent access
+    - Without explicit locking, concurrent activations can race and hit unique constraint
+    - Prefer deterministic behavior over relying on constraint violation errors
+
+15. **GUC checks with `current_setting(..., true)` must handle NULL**:
+    - `current_setting('name', true)` returns NULL if the setting doesn't exist
+    - Using `<> 'value'` with NULL yields NULL, not TRUE
+    - Use `IS DISTINCT FROM` or `COALESCE(..., 'default')` for correct boolean logic
+    - Example: `IF current_setting('encrypt.enable', true) IS DISTINCT FROM 'on'`
+
 ### Upgrade Script Rules
 
 1. **Never assume objects exist in a specific schema**:

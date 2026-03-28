@@ -753,7 +753,18 @@ GRANT USAGE ON SCHEMA @extschema@ TO column_encrypt_admin;
 GRANT USAGE ON SCHEMA @extschema@ TO column_encrypt_runtime;
 GRANT USAGE ON SCHEMA @extschema@ TO column_encrypt_reader;
 
-GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA encrypt TO column_encrypt_admin;
+-- Use dynamic SQL because IN SCHEMA requires a literal schema name
+DO $$
+DECLARE
+    v_extschema TEXT;
+BEGIN
+    SELECT n.nspname INTO v_extschema
+      FROM pg_catalog.pg_extension e
+      JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'column_encrypt';
+    EXECUTE pg_catalog.format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %I TO column_encrypt_admin', v_extschema);
+END;
+$$;
 GRANT EXECUTE ON FUNCTION load_key(TEXT, BOOLEAN) TO column_encrypt_runtime;
 GRANT EXECUTE ON FUNCTION unload_key() TO column_encrypt_runtime;
 GRANT EXECUTE ON FUNCTION keys() TO column_encrypt_runtime;
@@ -774,7 +785,7 @@ GRANT EXECUTE ON FUNCTION status() TO column_encrypt_reader;
 
 CREATE OR REPLACE FUNCTION cipher_key_disable_log() RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 BEGIN
     RAISE NOTICE 'DEPRECATED: cipher_key_disable_log() is no longer needed. encrypt.* functions handle log masking automatically.';
@@ -785,7 +796,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION cipher_key_enable_log() RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 BEGIN
     RAISE NOTICE 'DEPRECATED: cipher_key_enable_log() is no longer needed. encrypt.* functions handle log masking automatically.';

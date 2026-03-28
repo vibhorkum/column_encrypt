@@ -143,9 +143,19 @@ all related issues and present a consolidated final output.
 | Apparent Issue | Why It May Be Intentional |
 |----------------|---------------------------|
 | Helper function revoked from PUBLIC | By design — called via SECURITY DEFINER wrappers |
-| No explicit schema creation in v4.0.sql | PostgreSQL creates it from control file |
+| No explicit schema creation in v4.0.sql | Schema must be pre-created by user/CI before CREATE EXTENSION (see below) |
 | Dynamic SQL with `format()` | Required for schema-safe pgcrypto calls |
 | `@extschema@` references | Correct pattern for extension schema portability |
+
+### Schema Creation Model
+
+**Important**: With `schema = encrypt` and `relocatable = false` in the control file,
+PostgreSQL does **NOT** auto-create the schema. The schema must be pre-created before
+`CREATE EXTENSION`. This is why CI jobs include `CREATE SCHEMA IF NOT EXISTS encrypt;`
+before installing the extension.
+
+Install scripts (like `column_encrypt--4.0.sql`) do not include `CREATE SCHEMA`
+because the schema is expected to already exist.
 
 ### Before Suggesting a Fix
 

@@ -113,23 +113,31 @@ $$;
 -- This aligns upgraded databases with fresh v4.0 installs which only use column_encrypt_user.
 -- The roles themselves are kept (dropping would break GRANT role TO user chains).
 DO $$
+DECLARE
+    v_extschema TEXT;
 BEGIN
+    -- Look up extension schema dynamically (can't use @extschema@ in DO blocks)
+    SELECT n.nspname INTO v_extschema
+      FROM pg_catalog.pg_extension e
+      JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'column_encrypt';
+
     -- Revoke from column_encrypt_admin if it exists
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'column_encrypt_admin') THEN
-        EXECUTE 'REVOKE USAGE ON SCHEMA encrypt FROM column_encrypt_admin';
-        EXECUTE 'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA encrypt FROM column_encrypt_admin';
+        EXECUTE pg_catalog.format('REVOKE USAGE ON SCHEMA %I FROM column_encrypt_admin', v_extschema);
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA %I FROM column_encrypt_admin', v_extschema);
     END IF;
 
     -- Revoke from column_encrypt_runtime if it exists
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'column_encrypt_runtime') THEN
-        EXECUTE 'REVOKE USAGE ON SCHEMA encrypt FROM column_encrypt_runtime';
-        EXECUTE 'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA encrypt FROM column_encrypt_runtime';
+        EXECUTE pg_catalog.format('REVOKE USAGE ON SCHEMA %I FROM column_encrypt_runtime', v_extschema);
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA %I FROM column_encrypt_runtime', v_extschema);
     END IF;
 
     -- Revoke from column_encrypt_reader if it exists
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'column_encrypt_reader') THEN
-        EXECUTE 'REVOKE USAGE ON SCHEMA encrypt FROM column_encrypt_reader';
-        EXECUTE 'REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA encrypt FROM column_encrypt_reader';
+        EXECUTE pg_catalog.format('REVOKE USAGE ON SCHEMA %I FROM column_encrypt_reader', v_extschema);
+        EXECUTE pg_catalog.format('REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA %I FROM column_encrypt_reader', v_extschema);
     END IF;
 END;
 $$;
@@ -380,6 +388,9 @@ CREATE OR REPLACE FUNCTION activate_key(key_id INTEGER) RETURNS BOOLEAN
     SET search_path TO pg_catalog
 AS $$
 BEGIN
+    -- Serialize concurrent activations to prevent unique index race
+    LOCK TABLE @extschema@.cipher_key_table IN EXCLUSIVE MODE;
+
     IF NOT EXISTS (
         SELECT 1 FROM @extschema@.cipher_key_table
         WHERE key_version = key_id AND key_state <> 'revoked'
@@ -440,7 +451,8 @@ DECLARE
     v_count BIGINT := 0;
     v_batch BIGINT;
 BEGIN
-    IF current_setting('encrypt.enable', true) <> 'on' THEN
+    -- Use IS DISTINCT FROM to handle NULL when GUC is missing (missing_ok=true)
+    IF current_setting('encrypt.enable', true) IS DISTINCT FROM 'on' THEN
         RAISE EXCEPTION 'encryption must be enabled'
             USING ERRCODE = 'feature_not_supported';
     END IF;

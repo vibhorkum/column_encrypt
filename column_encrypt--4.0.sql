@@ -489,12 +489,19 @@ COMMENT ON FUNCTION unload_key() IS
 
 /*
  * activate_key - Make a key the active key
+ *
+ * Uses explicit table lock to prevent concurrent activation races.
+ * Without this, two sessions activating different keys could race and
+ * one would hit the unique partial index with a non-deterministic error.
  */
 CREATE FUNCTION activate_key(key_id INTEGER) RETURNS BOOLEAN
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO pg_catalog
 AS $$
 BEGIN
+    -- Serialize concurrent activations to prevent unique index race
+    LOCK TABLE @extschema@.cipher_key_table IN EXCLUSIVE MODE;
+
     IF NOT EXISTS (
         SELECT 1 FROM @extschema@.cipher_key_table
         WHERE key_version = key_id AND key_state <> 'revoked'
@@ -567,7 +574,8 @@ DECLARE
     v_count BIGINT := 0;
     v_batch BIGINT;
 BEGIN
-    IF current_setting('encrypt.enable', true) <> 'on' THEN
+    -- Use IS DISTINCT FROM to handle NULL when GUC is missing (missing_ok=true)
+    IF current_setting('encrypt.enable', true) IS DISTINCT FROM 'on' THEN
         RAISE EXCEPTION 'encryption must be enabled'
             USING ERRCODE = 'feature_not_supported';
     END IF;
