@@ -644,8 +644,9 @@ BEGIN
 END;
 $$;
 
+-- Add SECURITY DEFINER to access internal _pgcrypto_schema() helper
 CREATE OR REPLACE FUNCTION blind_index(value TEXT, hmac_key TEXT) RETURNS TEXT
-    LANGUAGE plpgsql STABLE STRICT
+    LANGUAGE plpgsql STABLE STRICT SECURITY DEFINER
     SET search_path TO pg_catalog
 AS $$
 DECLARE

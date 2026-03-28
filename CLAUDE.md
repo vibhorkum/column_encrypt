@@ -115,7 +115,14 @@ When modifying SQL functions:
     - Reference helpers as `@extschema@._pgcrypto_schema()` in SQL scripts
     - Helpers should be STABLE or IMMUTABLE as appropriate for their behavior
 
-12. **Function volatility must match actual behavior**:
+12. **Public API functions calling private helpers must use SECURITY DEFINER**:
+    - Internal helpers (e.g., `_pgcrypto_schema()`) are revoked from PUBLIC
+    - Public API functions granted to `column_encrypt_user` that call these helpers
+      will fail with "permission denied" unless they are SECURITY DEFINER
+    - All `encrypt.*` API functions should be SECURITY DEFINER with `SET search_path TO pg_catalog`
+    - This pattern maintains least privilege while allowing controlled access
+
+13. **Function volatility must match actual behavior**:
     - IMMUTABLE: No catalog lookups, no external state access
     - STABLE: Catalog lookups OK, same result within transaction
     - VOLATILE: External state changes, non-deterministic results

@@ -153,6 +153,9 @@ jobs:
           createdb test_upgrade_33
           psql -h /tmp -p $PGPORT -d test_upgrade_33 \
             -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          # Pre-create encrypt schema for extension (schema = encrypt in control file)
+          psql -h /tmp -p $PGPORT -d test_upgrade_33 \
+            -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
           # Install v3.1
           psql -h /tmp -p $PGPORT -d test_upgrade_33 \
             -c "CREATE EXTENSION column_encrypt VERSION '3.1';"
@@ -194,6 +197,9 @@ jobs:
           createdb test_upgrade_40
           psql -h /tmp -p $PGPORT -d test_upgrade_40 \
             -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          # Pre-create encrypt schema for extension (schema = encrypt in control file)
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 \
+            -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
           # Install v3.3 first
           psql -h /tmp -p $PGPORT -d test_upgrade_40 \
             -c "CREATE EXTENSION column_encrypt VERSION '3.3';"
@@ -235,6 +241,9 @@ jobs:
           createdb test_v40_fresh
           psql -h /tmp -p $PGPORT -d test_v40_fresh \
             -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          # Pre-create encrypt schema for extension (schema = encrypt in control file)
+          psql -h /tmp -p $PGPORT -d test_v40_fresh \
+            -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
           # Fresh install of v4.0
           psql -h /tmp -p $PGPORT -d test_v40_fresh \
             -c "CREATE EXTENSION column_encrypt VERSION '4.0';"

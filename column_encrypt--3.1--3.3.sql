@@ -674,10 +674,11 @@ COMMENT ON FUNCTION status() IS
  * blind_index - Create searchable blind index
  *
  * Uses dynamic SQL to call pgcrypto's hmac() in its actual schema.
+ * SECURITY DEFINER to access internal _pgcrypto_schema() helper.
  * STABLE because it depends on pgcrypto extension location (catalog lookup).
  */
 CREATE FUNCTION blind_index(value TEXT, hmac_key TEXT) RETURNS TEXT
-    LANGUAGE plpgsql STABLE STRICT
+    LANGUAGE plpgsql STABLE STRICT SECURITY DEFINER
     SET search_path TO pg_catalog
 AS $$
 DECLARE
