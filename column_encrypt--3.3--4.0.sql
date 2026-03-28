@@ -717,7 +717,7 @@ COMMENT ON FUNCTION revoke_key(INTEGER) IS
     'Revokes a key version, preventing it from being loaded.';
 
 COMMENT ON FUNCTION rotate(TEXT, TEXT, TEXT, INTEGER) IS
-    'Re-encrypts column data with the current active key. Returns row count.';
+    'Re-encrypts entire column with the active key. batch_size controls internal UPDATE chunk size. Returns total rows processed.';
 
 COMMENT ON FUNCTION verify(TEXT, TEXT, TEXT, INTEGER) IS
     'Verifies encrypted data can be decrypted with loaded keys.';

@@ -222,7 +222,9 @@ SELECT encrypt.load_key('my-master-passphrase', true);
 -- Activate v3 (also sets encrypt.key_version)
 SELECT encrypt.activate_key(3);
 
--- Batch rotation with limit
+-- Test rotate() with small internal batch_size.
+-- Note: rotate() processes the entire column per call (using batch_size as internal
+-- chunk size). The first call returns the total count; subsequent calls return 0.
 DO $$
 DECLARE
     moved bigint;

@@ -475,7 +475,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION rotate(TEXT, TEXT, TEXT, INTEGER) IS
-    'Re-encrypts all data in the column with the current active key.';
+    'Re-encrypts entire column with the active key. batch_size controls internal UPDATE chunk size. Returns total rows processed.';
 
 /*
  * verify - Verify encrypted column can be decrypted

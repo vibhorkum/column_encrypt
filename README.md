@@ -277,7 +277,7 @@ All encryption functions are in the `encrypt` schema:
 | `encrypt.unload_key()` | `void` | Securely removes all loaded keys from session memory. |
 | `encrypt.activate_key(key_id integer)` | `boolean` | Sets a key as active for new encryptions (retires previous active key). |
 | `encrypt.revoke_key(key_id integer)` | `boolean` | Prevents a key from being loaded. |
-| `encrypt.rotate(schema text, table text, column text, batch_size integer DEFAULT 10000)` | `bigint` | Re-encrypts data with the active key. Returns rows processed. |
+| `encrypt.rotate(schema text, table text, column text, batch_size integer DEFAULT 10000)` | `bigint` | Re-encrypts entire column with the active key. `batch_size` controls internal UPDATE chunk size. Returns total rows processed. |
 | `encrypt.verify(schema text, table text, column text, sample_size integer DEFAULT 100)` | `setof record` | Verifies encryption integrity by sampling rows. |
 | `encrypt.keys()` | `setof record` | Lists all registered keys with state and metadata. |
 | `encrypt.status()` | `record` | Returns quick status: key_loaded, active_key_version, encrypted_column_count. |
@@ -344,16 +344,10 @@ SELECT encrypt.load_key('my-master-passphrase', all_versions => true);
 SELECT encrypt.activate_key(2);
 SELECT encrypt.rotate('public', 'secure_data', 'ssn');
 
--- Or rotate in batches for large tables
-DO $$
-DECLARE moved bigint;
-BEGIN
-    LOOP
-        moved := encrypt.rotate('public', 'secure_data', 'ssn', 5000);
-        EXIT WHEN moved = 0;
-    END LOOP;
-END;
-$$;
+-- For large tables, use a smaller batch_size to reduce per-UPDATE lock duration.
+-- Note: rotate() processes the entire column in one call, using batch_size as
+-- the internal chunk size for UPDATE operations. Returns total rows processed.
+SELECT encrypt.rotate('public', 'secure_data', 'ssn', 5000);
 
 -- Step 4: Clear the session keyring
 SELECT encrypt.unload_key();

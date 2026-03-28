@@ -174,6 +174,25 @@ automatically execute both scripts in sequence.
 - WRONG: "You cannot upgrade directly from 3.1 to 4.0"
 - RIGHT: "While PostgreSQL can chain upgrades automatically, we recommend staged migration..."
 
+### API Semantics and Parameter Naming
+
+When reviewing API functions, verify that docs/tests match actual implementation behavior:
+
+1. **Read the function body, not just the signature**
+   - A `batch_size` parameter might be internal chunk size, not per-call limit
+   - Check for internal loops that process everything vs. returning after one batch
+
+2. **Before flagging docs/code mismatch, determine which is "correct"**
+   - If code behavior is consistent and function comments are accurate, fix the docs/README
+   - If code behavior conflicts with clear API contract, fix the code
+   - Changing runtime behavior is a breaking change — prefer fixing docs when behavior is reasonable
+
+3. **Example: `encrypt.rotate(batch_size)`**
+   - Processes entire column in one call (internal loop until done)
+   - `batch_size` controls internal UPDATE chunk size, not per-call row limit
+   - Function comment says "Re-encrypts entire column" — this is the intended contract
+   - README examples should not show DO blocks implying incremental per-call batching
+
 ### Before Suggesting a Fix
 
 Ask yourself:

@@ -223,6 +223,13 @@ When modifying SQL functions:
    - Clearly state WHY staged migration matters (e.g., deprecation period for code updates)
    - Use "we recommend" or "operationally, you should" rather than false technical claims
 
+6. **Document API parameter semantics precisely**:
+   - Parameter names like `batch_size` must match actual behavior
+   - If a function processes everything in one call with internal chunking, say so
+   - Do NOT show example loops that imply per-call incremental behavior when function completes everything
+   - Example: `encrypt.rotate(batch_size)` uses batch_size as internal chunk size, not per-call limit
+   - Function comments and docs should clearly state "entire column" vs "up to N rows"
+
 ### Regression Testing Rules
 
 1. **Security-related behavior must always be regression-tested**:

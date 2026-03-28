@@ -138,7 +138,7 @@ SELECT cipher_key_reencrypt_data_batch('public', 'mytable', 'secret_col', 1000);
 **After (v3.3+):**
 ```sql
 SELECT encrypt.rotate('public', 'mytable', 'secret_col');
--- Batch limit:
+-- With smaller internal batch size (reduces per-UPDATE lock duration):
 SELECT encrypt.rotate('public', 'mytable', 'secret_col', 1000);
 ```
 
