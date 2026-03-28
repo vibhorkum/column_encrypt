@@ -19,7 +19,7 @@
 CREATE FUNCTION is_key_loaded() RETURNS boolean
     LANGUAGE sql STABLE
 AS $$
-    SELECT array_length(loaded_cipher_key_versions(), 1) IS NOT NULL;
+    SELECT array_length(@extschema@.loaded_cipher_key_versions(), 1) IS NOT NULL;
 $$;
 
 COMMENT ON FUNCTION is_key_loaded() IS
@@ -42,7 +42,7 @@ RETURNS TABLE (
     needs_rotation boolean
 )
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 DECLARE
     rec record;
@@ -85,7 +85,7 @@ BEGIN
         null_count := v_null_count;
 
         -- Get distinct key versions (only if rows exist and keys are loaded)
-        IF v_row_count > v_null_count AND is_key_loaded() THEN
+        IF v_row_count > v_null_count AND @extschema@.is_key_loaded() THEN
             BEGIN
                 EXECUTE format(
                     'SELECT array_agg(DISTINCT enc_key_version(%I) ORDER BY enc_key_version(%I)) FROM %I.%I WHERE %I IS NOT NULL',
@@ -130,7 +130,7 @@ RETURNS TABLE (
     is_current boolean
 )
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 DECLARE
     rec record;
@@ -144,7 +144,7 @@ BEGIN
     -- Get all registered key versions
     FOR v_key_record IN
         SELECT k.key_version, k.key_state
-        FROM cipher_key_table k
+        FROM @extschema@.cipher_key_table k
         ORDER BY k.key_version
     LOOP
         key_version := v_key_record.key_version;
@@ -155,7 +155,7 @@ BEGIN
         row_count := 0;
 
         -- Count usage across all encrypted columns
-        IF is_key_loaded() THEN
+        IF @extschema@.is_key_loaded() THEN
             FOR rec IN
                 SELECT
                     n.nspname AS schema_name,
@@ -210,7 +210,7 @@ RETURNS TABLE (
     metric_labels jsonb
 )
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 DECLARE
     v_count bigint;
@@ -235,7 +235,7 @@ BEGIN
     -- Keys by state
     FOR v_stats IN
         SELECT key_state, count(*) AS cnt
-        FROM cipher_key_table
+        FROM @extschema@.cipher_key_table
         GROUP BY key_state
     LOOP
         metric_name := 'column_encrypt_keys_total';
@@ -246,7 +246,7 @@ BEGIN
 
     -- Keys expiring in 30 days
     SELECT count(*) INTO v_count
-    FROM cipher_key_table
+    FROM @extschema@.cipher_key_table
     WHERE expires_at IS NOT NULL
       AND expires_at <= now() + interval '30 days'
       AND expires_at > now()
@@ -259,7 +259,7 @@ BEGIN
 
     -- Expired keys (not yet revoked)
     SELECT count(*) INTO v_count
-    FROM cipher_key_table
+    FROM @extschema@.cipher_key_table
     WHERE expires_at IS NOT NULL
       AND expires_at <= now()
       AND key_state NOT IN ('revoked');
@@ -269,9 +269,9 @@ BEGIN
     metric_labels := '{}'::jsonb;
     RETURN NEXT;
 
-    -- Active rotation jobs
-    IF EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'cipher_rotation_jobs') THEN
-        EXECUTE 'SELECT count(*) FROM cipher_rotation_jobs WHERE status = ''running''' INTO v_count;
+    -- Active rotation jobs (use schema-qualified table reference)
+    IF EXISTS (SELECT 1 FROM @extschema@.cipher_rotation_jobs LIMIT 1) THEN
+        SELECT count(*) INTO v_count FROM @extschema@.cipher_rotation_jobs WHERE status = 'running';
         metric_name := 'column_encrypt_rotation_jobs_active';
         metric_value := COALESCE(v_count, 0);
         metric_labels := '{}'::jsonb;
@@ -280,13 +280,13 @@ BEGIN
 
     -- Session key loaded
     metric_name := 'column_encrypt_session_key_loaded';
-    metric_value := CASE WHEN is_key_loaded() THEN 1 ELSE 0 END;
+    metric_value := CASE WHEN @extschema@.is_key_loaded() THEN 1 ELSE 0 END;
     metric_labels := '{}'::jsonb;
     RETURN NEXT;
 
     -- Loaded key versions count
     metric_name := 'column_encrypt_session_keys_count';
-    metric_value := COALESCE(array_length(loaded_cipher_key_versions(), 1), 0);
+    metric_value := COALESCE(array_length(@extschema@.loaded_cipher_key_versions(), 1), 0);
     metric_labels := '{}'::jsonb;
     RETURN NEXT;
 END;
@@ -315,7 +315,7 @@ RETURNS TABLE (
     recommendation text
 )
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 DECLARE
     rec record;
@@ -418,7 +418,7 @@ RETURNS TABLE (
     coverage_pct numeric
 )
     LANGUAGE sql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
     SELECT
         classification,
@@ -426,7 +426,7 @@ AS $$
         count(*) FILTER (WHERE is_encrypted) AS encrypted_columns,
         count(*) FILTER (WHERE NOT is_encrypted) AS unencrypted_columns,
         round(100.0 * count(*) FILTER (WHERE is_encrypted) / count(*), 1) AS coverage_pct
-    FROM cipher_coverage_audit(p_schema)
+    FROM @extschema@.cipher_coverage_audit(p_schema)
     GROUP BY classification
     ORDER BY
         CASE classification
@@ -491,7 +491,7 @@ CREATE FUNCTION cipher_start_rotation_job(
     p_throttle_ms integer DEFAULT 0
 ) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 DECLARE
     v_job_id bigint;
@@ -531,7 +531,7 @@ BEGIN
 
     -- Check for existing active job on same column
     IF EXISTS (
-        SELECT 1 FROM cipher_rotation_jobs
+        SELECT 1 FROM @extschema@.cipher_rotation_jobs
         WHERE schema_name = p_schema
           AND table_name = p_table
           AND column_name = p_column
@@ -547,7 +547,7 @@ BEGIN
     ) INTO v_total_rows USING v_target_version;
 
     -- Create job record
-    INSERT INTO cipher_rotation_jobs (
+    INSERT INTO @extschema@.cipher_rotation_jobs (
         schema_name, table_name, column_name, target_key_version,
         batch_size, throttle_ms, total_rows, status
     ) VALUES (
@@ -567,17 +567,17 @@ COMMENT ON FUNCTION cipher_start_rotation_job(text, text, text, integer, integer
  */
 CREATE FUNCTION cipher_process_rotation_batch(p_job_id bigint) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 DECLARE
-    v_job cipher_rotation_jobs%ROWTYPE;
+    v_job @extschema@.cipher_rotation_jobs%ROWTYPE;
     v_sql text;
     v_processed bigint;
     v_col_type text;
 BEGIN
     -- Get and lock the job
     SELECT * INTO v_job
-    FROM cipher_rotation_jobs
+    FROM @extschema@.cipher_rotation_jobs
     WHERE job_id = p_job_id
     FOR UPDATE;
 
@@ -591,7 +591,7 @@ BEGIN
 
     -- Ensure encryption is enabled
     IF current_setting('encrypt.enable') <> 'on' THEN
-        UPDATE cipher_rotation_jobs
+        UPDATE @extschema@.cipher_rotation_jobs
         SET status = 'failed',
             error_message = 'encrypt.enable must be on',
             updated_at = now()
@@ -601,7 +601,7 @@ BEGIN
 
     -- Update status to running if pending
     IF v_job.status = 'pending' THEN
-        UPDATE cipher_rotation_jobs
+        UPDATE @extschema@.cipher_rotation_jobs
         SET status = 'running',
             started_at = now(),
             updated_at = now()
@@ -642,7 +642,7 @@ BEGIN
     GET DIAGNOSTICS v_processed = ROW_COUNT;
 
     -- Update job progress
-    UPDATE cipher_rotation_jobs
+    UPDATE @extschema@.cipher_rotation_jobs
     SET processed_rows = processed_rows + v_processed,
         updated_at = now(),
         status = CASE
@@ -672,7 +672,7 @@ COMMENT ON FUNCTION cipher_process_rotation_batch(bigint) IS
  */
 CREATE FUNCTION cipher_run_rotation_job(p_job_id bigint) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 DECLARE
     v_processed bigint;
@@ -682,13 +682,13 @@ BEGIN
     LOOP
         -- Check job status
         SELECT status INTO v_status
-        FROM cipher_rotation_jobs
+        FROM @extschema@.cipher_rotation_jobs
         WHERE job_id = p_job_id;
 
         EXIT WHEN v_status NOT IN ('pending', 'running');
 
         -- Process one batch
-        v_processed := cipher_process_rotation_batch(p_job_id);
+        v_processed := @extschema@.cipher_process_rotation_batch(p_job_id);
         v_total := v_total + v_processed;
 
         EXIT WHEN v_processed = 0;
@@ -706,10 +706,10 @@ COMMENT ON FUNCTION cipher_run_rotation_job(bigint) IS
  */
 CREATE FUNCTION cipher_pause_rotation_job(p_job_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 BEGIN
-    UPDATE cipher_rotation_jobs
+    UPDATE @extschema@.cipher_rotation_jobs
     SET status = 'paused',
         updated_at = now()
     WHERE job_id = p_job_id
@@ -727,10 +727,10 @@ COMMENT ON FUNCTION cipher_pause_rotation_job(bigint) IS
  */
 CREATE FUNCTION cipher_resume_rotation_job(p_job_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 BEGIN
-    UPDATE cipher_rotation_jobs
+    UPDATE @extschema@.cipher_rotation_jobs
     SET status = 'running',
         updated_at = now()
     WHERE job_id = p_job_id
@@ -748,10 +748,10 @@ COMMENT ON FUNCTION cipher_resume_rotation_job(bigint) IS
  */
 CREATE FUNCTION cipher_cancel_rotation_job(p_job_id bigint) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 BEGIN
-    UPDATE cipher_rotation_jobs
+    UPDATE @extschema@.cipher_rotation_jobs
     SET status = 'cancelled',
         updated_at = now()
     WHERE job_id = p_job_id
@@ -786,7 +786,7 @@ RETURNS TABLE (
     created_by name
 )
     LANGUAGE sql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
     SELECT
         j.job_id,
@@ -816,7 +816,7 @@ AS $$
         j.started_at,
         j.updated_at,
         j.created_by
-    FROM cipher_rotation_jobs j
+    FROM @extschema@.cipher_rotation_jobs j
     ORDER BY
         CASE j.status
             WHEN 'running' THEN 1

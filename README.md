@@ -105,12 +105,17 @@ The extension registers two custom base types (`encrypted_text`, `encrypted_byte
    systemctl restart postgresql
    ```
 
-6. **Create the extension** in the target database (requires superuser). `pgcrypto` will be installed automatically as a dependency if it is not already present:
+6. **Create the encrypt schema** (required before installing the extension):
+   ```sql
+   CREATE SCHEMA IF NOT EXISTS encrypt;
+   ```
+
+7. **Create the extension** in the target database (requires superuser). `pgcrypto` will be installed automatically as a dependency if it is not already present:
    ```sql
    CREATE EXTENSION column_encrypt;
    ```
 
-7. **Configure search_path** to include the `encrypt` schema. The extension types (`encrypted_text`, `encrypted_bytea`) and functions live in the `encrypt` schema. To use unqualified type names, add `encrypt` to your search_path:
+8. **Configure search_path** to include the `encrypt` schema. The extension types (`encrypted_text`, `encrypted_bytea`) and functions live in the `encrypt` schema. To use unqualified type names, add `encrypt` to your search_path:
    ```sql
    -- For the current database (recommended)
    ALTER DATABASE your_database SET search_path TO public, encrypt, pg_catalog;
