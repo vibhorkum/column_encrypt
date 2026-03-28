@@ -146,7 +146,7 @@ CREATE TABLE test_enc_bytea (id serial, data encrypted_bytea);
 INSERT INTO test_enc_bytea(data) VALUES ('hello'::bytea);
 INSERT INTO test_enc_bytea(data) VALUES ('world'::bytea);
 SELECT data FROM test_enc_bytea ORDER BY id;
-     data
+     data     
 --------------
  \x68656c6c6f
  \x776f726c64
