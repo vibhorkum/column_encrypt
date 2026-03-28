@@ -98,6 +98,86 @@ SELECT encrypt.rotate('public', 'table', 'column');
 - Weaken validation "for convenience"
 - Add PostgreSQL < 14 compatibility hacks
 
+## Review Guidelines for AI Assistants (Copilot, Claude, etc.)
+
+When reviewing this repository, perform **multiple analysis passes** before producing
+final recommendations. Do not suggest fixes after a single pass — iterate to find
+all related issues and present a consolidated final output.
+
+### Multi-Pass Review Process
+
+1. **Pass 1 — Catalog the issue**: Identify what appears to be wrong
+2. **Pass 2 — Verify against implementation**: Read the actual code, not just function signatures
+3. **Pass 3 — Check privilege model**: Trace GRANT/REVOKE chains and SECURITY DEFINER usage
+4. **Pass 4 — Check CI and install paths**: Verify control file, install scripts, and CI consistency
+5. **Pass 5 — Consolidate**: Only then produce recommendations
+
+### Extension Schema and Privilege Model
+
+**Understand before suggesting**:
+
+1. **Internal helpers are intentionally private**:
+   - Functions like `_pgcrypto_schema()` are `REVOKE ... FROM PUBLIC` by design
+   - Do NOT suggest granting public access to internal helpers
+   - If a public function needs a private helper, it should use SECURITY DEFINER
+
+2. **All `encrypt.*` API functions must be SECURITY DEFINER**:
+   - This allows them to call internal helpers
+   - They must also have `SET search_path TO pg_catalog`
+   - If you find a public API function that is NOT SECURITY DEFINER, flag it
+
+3. **Schema ownership follows PostgreSQL extension semantics**:
+   - Control file has `schema = encrypt` with `relocatable = false`
+   - PostgreSQL creates the schema if it doesn't exist during CREATE EXTENSION
+   - Pre-creating the schema externally is allowed but creates ownership nuances
+   - Do NOT suggest `CREATE SCHEMA IF NOT EXISTS` inside extension scripts —
+     it fails when the schema was pre-created externally
+
+4. **CI must be consistent with install model**:
+   - Do NOT suggest CI workarounds without checking `column_encrypt.control`
+   - Do NOT suggest schema pre-creation workarounds without understanding why
+   - Verify upgrade scripts handle both fresh-install and upgrade scenarios
+
+### Common False Positives to Avoid
+
+| Apparent Issue | Why It May Be Intentional |
+|----------------|---------------------------|
+| Helper function revoked from PUBLIC | By design — called via SECURITY DEFINER wrappers |
+| No explicit schema creation in v4.0.sql | PostgreSQL creates it from control file |
+| Dynamic SQL with `format()` | Required for schema-safe pgcrypto calls |
+| `@extschema@` references | Correct pattern for extension schema portability |
+
+### Before Suggesting a Fix
+
+Ask yourself:
+- Did I read the actual function implementation, not just the signature?
+- Did I trace the privilege chain (who can call what)?
+- Did I check if this pattern is used consistently elsewhere?
+- Did I verify the control file and install script interaction?
+- Is this truly a bug, or intentional least-privilege design?
+
+### Output Format for Reviews
+
+Structure findings as:
+
+```
+## Issue: [Brief description]
+
+**Status**: Valid / Partially Valid / Not Valid
+**Severity**: Critical / High / Medium / Low
+
+**Evidence**: [Specific code references]
+
+**Root Cause**: [Why this happens]
+
+**Recommended Fix**: [Specific change]
+
+**Why This Fix**: [Rationale, alternatives considered]
+```
+
+Present all findings together after completing all passes — do not stream
+partial findings that may be invalidated by later analysis.
+
 ## File Structure
 
 | File | Purpose |
