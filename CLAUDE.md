@@ -57,17 +57,21 @@ When modifying SQL functions:
    - All object references must be schema-qualified (e.g., `@extschema@.cipher_key_table`,
      `pg_catalog.pg_attribute`)
 
-2. **Use `@extschema@` for extension objects, not hardcoded `public`**:
-   - The extension is non-relocatable but can be installed in any schema
-   - PostgreSQL substitutes `@extschema@` with the actual extension schema at install time
-   - Examples: `@extschema@.cipher_key_table`, `@extschema@.enc_store_key()`
+2. **Use `@extschema@` for extension objects**:
+   - The extension uses a fixed `encrypt` schema (`relocatable = false`, `schema = encrypt`)
+   - Users must create the schema before installation: `CREATE SCHEMA encrypt;`
+   - NEVER hardcode schema names like `encrypt.` in SQL scripts - use `@extschema@`
+   - PostgreSQL substitutes `@extschema@` with `encrypt` at install time
+   - Examples: `@extschema@.cipher_key_table`, `@extschema@._pgcrypto_schema()`
+   - Note: Full relocatability is not supported due to PostgreSQL's `@extschema@`
+     substitution limitations with `relocatable = true`
 
 3. **Dynamic pgcrypto schema lookup**:
    - pgcrypto can be installed in any schema, not just `public`
-   - Use `encrypt._pgcrypto_schema()` to get the actual schema at runtime
+   - Use `@extschema@._pgcrypto_schema()` to get the actual schema at runtime
    - Use dynamic SQL with `format()` and `EXECUTE` for pgcrypto calls:
      ```sql
-     v_pgcrypto_schema := encrypt._pgcrypto_schema();
+     v_pgcrypto_schema := @extschema@._pgcrypto_schema();
      EXECUTE format('SELECT %I.pgp_sym_encrypt($1, $2, $3)', v_pgcrypto_schema)
         INTO v_wrapped_key
        USING dek, passphrase, 'cipher-algo=aes256, s2k-mode=3';
@@ -85,7 +89,7 @@ When modifying SQL functions:
 
 6. **All pgcrypto function calls must be schema-safe**:
    - This includes `hmac()`, `pgp_sym_encrypt()`, `pgp_sym_decrypt()`, etc.
-   - Use `encrypt._pgcrypto_schema()` or direct lookup from `pg_extension`/`pg_namespace`
+   - Use `@extschema@._pgcrypto_schema()` helper for schema lookup
    - Use dynamic SQL with `EXECUTE format('%I.function_name(...)', schema)`
 
 7. **Upgrade scripts must maintain security parity with fresh installs**:
@@ -98,6 +102,23 @@ When modifying SQL functions:
    - When documenting SQLSTATE, use 5-character codes (e.g., `28P01`)
    - Condition names (e.g., `invalid_password`) may be shown alongside but not instead of codes
    - Reference: https://www.postgresql.org/docs/current/errcodes-appendix.html
+
+10. **SECURITY DEFINER functions must not allow privilege escalation**:
+    - Dynamic SQL on user-supplied table/column names must verify caller privileges
+    - Use `has_table_privilege(session_user(), table, 'SELECT'/'UPDATE')` before dynamic queries
+    - Use `has_column_privilege(session_user(), table, column, 'SELECT'/'UPDATE')` for column access
+    - Return error or raise exception if caller lacks required privilege
+
+11. **Avoid duplicate helper logic**:
+    - Centralize common patterns (e.g., pgcrypto schema lookup) in internal helper functions
+    - All functions go in `@extschema@` - both internal helpers and public API
+    - Reference helpers as `@extschema@._pgcrypto_schema()` in SQL scripts
+    - Helpers should be STABLE or IMMUTABLE as appropriate for their behavior
+
+12. **Function volatility must match actual behavior**:
+    - IMMUTABLE: No catalog lookups, no external state access
+    - STABLE: Catalog lookups OK, same result within transaction
+    - VOLATILE: External state changes, non-deterministic results
 
 ### Documentation Rules
 
@@ -124,6 +145,11 @@ When modifying SQL functions:
 3. **Test C extension behavior via SQL wrappers when possible**:
    - Type send/receive functions can be called directly
    - Error conditions can be caught in PL/pgSQL exception handlers
+
+4. **Test both encrypted types symmetrically**:
+   - `encrypted_text` and `encrypted_bytea` share C implementation
+   - Test hash functions (`enc_hash_enctext`, `enc_hash_encbytea`) for both types
+   - Test equality operators and hash index support for both types
 
 ### v4.0 API (encrypt schema)
 

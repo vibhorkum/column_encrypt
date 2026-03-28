@@ -4,3 +4,4 @@ default_version = '4.0'
 requires = 'pgcrypto'
 module_pathname = '$libdir/column_encrypt'
 relocatable = false
+schema = encrypt

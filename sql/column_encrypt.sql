@@ -4,7 +4,14 @@
 -- Uses single column_encrypt_user role instead of 3-role system.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- Create the encrypt schema (required for the extension)
+CREATE SCHEMA IF NOT EXISTS encrypt;
 CREATE EXTENSION IF NOT EXISTS column_encrypt;
+
+-- Set search_path to include the encrypt schema (extension's fixed schema)
+-- public first so table creations go there, encrypt for type resolution
+SET search_path TO public, encrypt, pg_catalog;
 
 -- =============================================================================
 -- ROLE SETUP
@@ -310,7 +317,7 @@ SELECT COUNT(*) AS distinct_count FROM (
 ) sub;
 DROP TABLE test_equality;
 
--- Hash consistency
+-- Hash consistency for encrypted_text
 CREATE TABLE test_hash (id serial, val encrypted_text);
 INSERT INTO test_hash(val) VALUES ('hash-test');
 INSERT INTO test_hash(val) VALUES ('hash-test');
@@ -318,6 +325,15 @@ SELECT (enc_hash_enctext(val) = enc_hash_enctext(val)) AS hash_consistent
 FROM test_hash LIMIT 1;
 SELECT COUNT(DISTINCT enc_hash_enctext(val)) AS unique_hashes FROM test_hash;
 DROP TABLE test_hash;
+
+-- Hash consistency for encrypted_bytea
+CREATE TABLE test_hash_bytea (id serial, val encrypted_bytea);
+INSERT INTO test_hash_bytea(val) VALUES ('bytea-test'::bytea);
+INSERT INTO test_hash_bytea(val) VALUES ('bytea-test'::bytea);
+SELECT (enc_hash_encbytea(val) = enc_hash_encbytea(val)) AS hash_consistent
+FROM test_hash_bytea LIMIT 1;
+SELECT COUNT(DISTINCT enc_hash_encbytea(val)) AS unique_hashes FROM test_hash_bytea;
+DROP TABLE test_hash_bytea;
 
 -- =============================================================================
 -- ERROR CASES

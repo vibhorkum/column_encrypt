@@ -153,13 +153,19 @@ REVOKE EXECUTE ON FUNCTION loaded_cipher_key_versions() FROM PUBLIC;
  */
 
 /*
- * encrypt._pgcrypto_schema - Get the schema where pgcrypto is installed
+ * Move _pgcrypto_schema from encrypt schema to extension schema for consistency
+ */
+DROP FUNCTION IF EXISTS @extschema@._pgcrypto_schema();
+
+/*
+ * _pgcrypto_schema - Get the schema where pgcrypto is installed
  *
  * This helper function dynamically looks up the pgcrypto extension's schema
  * to avoid hardcoding assumptions. Used by SECURITY DEFINER functions to
  * safely call pgcrypto functions regardless of where the extension is installed.
+ * Created in @extschema@ for consistent relocatability patterns.
  */
-CREATE OR REPLACE FUNCTION encrypt._pgcrypto_schema() RETURNS TEXT
+CREATE FUNCTION _pgcrypto_schema() RETURNS TEXT
     LANGUAGE sql STABLE
     SET search_path TO pg_catalog
 AS $$
@@ -169,13 +175,13 @@ AS $$
      WHERE e.extname = 'pgcrypto';
 $$;
 
-COMMENT ON FUNCTION encrypt._pgcrypto_schema() IS
+COMMENT ON FUNCTION _pgcrypto_schema() IS
     'Returns the schema where pgcrypto extension is installed.';
 
 -- Internal function, not for direct use
-REVOKE EXECUTE ON FUNCTION encrypt._pgcrypto_schema() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION _pgcrypto_schema() FROM PUBLIC;
 
-CREATE OR REPLACE FUNCTION encrypt.register_key(
+CREATE OR REPLACE FUNCTION register_key(
     dek TEXT,
     passphrase TEXT,
     activate BOOLEAN DEFAULT true
@@ -210,7 +216,7 @@ BEGIN
     END IF;
 
     -- Look up pgcrypto schema dynamically to avoid hardcoding
-    v_pgcrypto_schema := encrypt._pgcrypto_schema();
+    v_pgcrypto_schema := @extschema@._pgcrypto_schema();
     IF v_pgcrypto_schema IS NULL THEN
         RAISE EXCEPTION 'pgcrypto extension is not installed'
             USING ERRCODE = 'feature_not_supported';
@@ -251,7 +257,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION encrypt.load_key(
+CREATE OR REPLACE FUNCTION load_key(
     passphrase TEXT,
     all_versions BOOLEAN DEFAULT false
 ) RETURNS BOOLEAN
@@ -282,7 +288,7 @@ BEGIN
     END IF;
 
     -- Look up pgcrypto schema dynamically to avoid hardcoding
-    v_pgcrypto_schema := encrypt._pgcrypto_schema();
+    v_pgcrypto_schema := @extschema@._pgcrypto_schema();
     IF v_pgcrypto_schema IS NULL THEN
         RAISE EXCEPTION 'pgcrypto extension is not installed'
             USING ERRCODE = 'feature_not_supported';
@@ -360,7 +366,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION encrypt.unload_key() RETURNS VOID
+CREATE OR REPLACE FUNCTION unload_key() RETURNS VOID
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO pg_catalog
 AS $$
@@ -369,7 +375,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION encrypt.activate_key(key_id INTEGER) RETURNS BOOLEAN
+CREATE OR REPLACE FUNCTION activate_key(key_id INTEGER) RETURNS BOOLEAN
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO pg_catalog
 AS $$
@@ -406,7 +412,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION encrypt.revoke_key(key_id INTEGER) RETURNS BOOLEAN
+CREATE OR REPLACE FUNCTION revoke_key(key_id INTEGER) RETURNS BOOLEAN
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO pg_catalog
 AS $$
@@ -418,7 +424,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION encrypt.rotate(
+CREATE OR REPLACE FUNCTION rotate(
     schema_name TEXT,
     table_name TEXT,
     column_name TEXT,
@@ -469,6 +475,26 @@ BEGIN
         RAISE EXCEPTION 'not an encrypted column' USING ERRCODE = 'wrong_object_type';
     END IF;
 
+    -- Verify session_user has UPDATE privilege (prevent privilege escalation)
+    IF NOT pg_catalog.has_table_privilege(
+        pg_catalog.session_user(),
+        pg_catalog.format('%I.%I', schema_name, table_name),
+        'UPDATE'
+    ) THEN
+        RAISE EXCEPTION 'permission denied for table %.%', schema_name, table_name
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF NOT pg_catalog.has_column_privilege(
+        pg_catalog.session_user(),
+        pg_catalog.format('%I.%I', schema_name, table_name),
+        column_name,
+        'UPDATE'
+    ) THEN
+        RAISE EXCEPTION 'permission denied for column %', column_name
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
     LOOP
         v_sql := format(
             'WITH batch AS (
@@ -492,7 +518,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION encrypt.verify(
+CREATE OR REPLACE FUNCTION verify(
     schema_name TEXT,
     table_name TEXT,
     column_name TEXT,
@@ -529,6 +555,24 @@ BEGIN
         status := 'error'; message := 'not an encrypted column'; RETURN NEXT; RETURN;
     END IF;
 
+    -- Verify session_user has SELECT privilege (prevent privilege escalation)
+    IF NOT pg_catalog.has_table_privilege(
+        pg_catalog.session_user(),
+        pg_catalog.format('%I.%I', schema_name, table_name),
+        'SELECT'
+    ) THEN
+        status := 'error'; message := 'permission denied for table'; RETURN NEXT; RETURN;
+    END IF;
+
+    IF NOT pg_catalog.has_column_privilege(
+        pg_catalog.session_user(),
+        pg_catalog.format('%I.%I', schema_name, table_name),
+        column_name,
+        'SELECT'
+    ) THEN
+        status := 'error'; message := 'permission denied for column'; RETURN NEXT; RETURN;
+    END IF;
+
     EXECUTE format('SELECT count(*) FROM %I.%I WHERE %I IS NOT NULL',
         schema_name, table_name, column_name) INTO v_total;
 
@@ -560,7 +604,7 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION encrypt.keys() RETURNS TABLE(
+CREATE OR REPLACE FUNCTION keys() RETURNS TABLE(
     key_id INTEGER, key_state TEXT, algorithm TEXT,
     created_at TIMESTAMPTZ, last_used TIMESTAMPTZ, use_count BIGINT
 )
@@ -571,7 +615,7 @@ AS $$
       FROM @extschema@.cipher_key_table ORDER BY key_version;
 $$;
 
-CREATE OR REPLACE FUNCTION encrypt.status() RETURNS TABLE(
+CREATE OR REPLACE FUNCTION status() RETURNS TABLE(
     key_loaded BOOLEAN, active_key_version INTEGER,
     session_keys INTEGER[], encrypted_column_count INTEGER
 )
@@ -600,19 +644,16 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION encrypt.blind_index(value TEXT, hmac_key TEXT) RETURNS TEXT
-    LANGUAGE plpgsql IMMUTABLE STRICT
+CREATE OR REPLACE FUNCTION blind_index(value TEXT, hmac_key TEXT) RETURNS TEXT
+    LANGUAGE plpgsql STABLE STRICT
     SET search_path TO pg_catalog
 AS $$
 DECLARE
     v_pgcrypto_schema TEXT;
     v_result TEXT;
 BEGIN
-    -- Look up pgcrypto schema dynamically
-    SELECT n.nspname INTO v_pgcrypto_schema
-      FROM pg_catalog.pg_extension e
-      JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
-     WHERE e.extname = 'pgcrypto';
+    -- Use centralized helper for pgcrypto schema lookup
+    v_pgcrypto_schema := @extschema@._pgcrypto_schema();
 
     IF v_pgcrypto_schema IS NULL THEN
         RAISE EXCEPTION 'pgcrypto extension is not installed'
@@ -647,32 +688,32 @@ COMMENT ON TABLE cipher_key_table IS
     'Wrapped encryption keys. Access via encrypt.keys() function.';
 
 -- Remove deprecation comments since functions are gone
-COMMENT ON FUNCTION encrypt.register_key(TEXT, TEXT, BOOLEAN) IS
+COMMENT ON FUNCTION register_key(TEXT, TEXT, BOOLEAN) IS
     'Registers a new encryption key. Returns the assigned key ID.';
 
-COMMENT ON FUNCTION encrypt.load_key(TEXT, BOOLEAN) IS
+COMMENT ON FUNCTION load_key(TEXT, BOOLEAN) IS
     'Loads encryption key(s) into session memory. Use all_versions=true for rotation.';
 
-COMMENT ON FUNCTION encrypt.unload_key() IS
+COMMENT ON FUNCTION unload_key() IS
     'Clears all encryption keys from session memory.';
 
-COMMENT ON FUNCTION encrypt.activate_key(INTEGER) IS
+COMMENT ON FUNCTION activate_key(INTEGER) IS
     'Makes the specified key version the active key for new encryptions.';
 
-COMMENT ON FUNCTION encrypt.revoke_key(INTEGER) IS
+COMMENT ON FUNCTION revoke_key(INTEGER) IS
     'Revokes a key version, preventing it from being loaded.';
 
-COMMENT ON FUNCTION encrypt.rotate(TEXT, TEXT, TEXT, INTEGER) IS
+COMMENT ON FUNCTION rotate(TEXT, TEXT, TEXT, INTEGER) IS
     'Re-encrypts column data with the current active key. Returns row count.';
 
-COMMENT ON FUNCTION encrypt.verify(TEXT, TEXT, TEXT, INTEGER) IS
+COMMENT ON FUNCTION verify(TEXT, TEXT, TEXT, INTEGER) IS
     'Verifies encrypted data can be decrypted with loaded keys.';
 
-COMMENT ON FUNCTION encrypt.keys() IS
+COMMENT ON FUNCTION keys() IS
     'Lists all registered encryption keys with state and usage.';
 
-COMMENT ON FUNCTION encrypt.status() IS
+COMMENT ON FUNCTION status() IS
     'Returns current encryption status: key loaded, active key, column count.';
 
-COMMENT ON FUNCTION encrypt.blind_index(TEXT, TEXT) IS
+COMMENT ON FUNCTION blind_index(TEXT, TEXT) IS
     'Creates HMAC-SHA256 blind index for searchable encryption.';
