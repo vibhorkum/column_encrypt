@@ -240,6 +240,10 @@ jobs:
             -c "CREATE EXTENSION column_encrypt VERSION '4.0';"
           psql -h /tmp -p $PGPORT -d test_v40_fresh -At \
             -c "SELECT extversion FROM pg_extension WHERE extname = 'column_encrypt';" | grep -Fx '4.0'
+          # Set database search_path to include encrypt schema for type resolution
+          # Extension types (encrypted_text, encrypted_bytea) live in encrypt schema
+          psql -h /tmp -p $PGPORT -d test_v40_fresh \
+            -c "ALTER DATABASE test_v40_fresh SET search_path TO public, encrypt, pg_catalog;"
           # Verify clean API (no deprecated functions)
           psql -h /tmp -p $PGPORT -d test_v40_fresh -At \
             -c "SELECT COUNT(*) FROM pg_proc WHERE proname = 'cipher_key_disable_log';" | grep -Fx '0'

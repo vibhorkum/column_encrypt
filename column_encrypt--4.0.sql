@@ -6,10 +6,11 @@
 --
 -- Usage:
 --   1. CREATE EXTENSION column_encrypt;
---   2. SELECT encrypt.register_key('your-32-byte-key', 'passphrase');
---   3. SELECT encrypt.load_key('passphrase');
---   4. CREATE TABLE t (data encrypted_text);
---   5. INSERT/SELECT works transparently
+--   2. SET search_path TO public, encrypt;  -- or ALTER DATABASE ... SET
+--   3. SELECT encrypt.register_key('your-32-byte-key', 'passphrase');
+--   4. SELECT encrypt.load_key('passphrase');
+--   5. CREATE TABLE t (data encrypted_text);
+--   6. INSERT/SELECT works transparently
 --
 -- Key rotation:
 --   1. SELECT encrypt.register_key('new-key', 'passphrase');

@@ -110,6 +110,20 @@ The extension registers two custom base types (`encrypted_text`, `encrypted_byte
    CREATE EXTENSION column_encrypt;
    ```
 
+7. **Configure search_path** to include the `encrypt` schema. The extension types (`encrypted_text`, `encrypted_bytea`) and functions live in the `encrypt` schema. To use unqualified type names, add `encrypt` to your search_path:
+   ```sql
+   -- For the current database (recommended)
+   ALTER DATABASE your_database SET search_path TO public, encrypt, pg_catalog;
+
+   -- Or for a specific role
+   ALTER ROLE your_role SET search_path TO public, encrypt, pg_catalog;
+
+   -- Or just for the current session
+   SET search_path TO public, encrypt, pg_catalog;
+   ```
+
+   Alternatively, use schema-qualified names: `encrypt.encrypted_text`.
+
 ### Upgrade Notes
 
 **Upgrading to v4.0:**

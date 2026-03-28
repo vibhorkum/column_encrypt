@@ -185,6 +185,12 @@ When modifying SQL functions:
    - Examples should work for users granted `column_encrypt_user` role
    - Do not show operations that require privileges beyond the role grants
 
+3. **Document search_path requirements when showing unqualified type usage**:
+   - Extension types (`encrypted_text`, `encrypted_bytea`) live in the `encrypt` schema
+   - Unqualified type names require `encrypt` in `search_path`
+   - Either show `search_path` setup OR use schema-qualified names (`encrypt.encrypted_text`)
+   - CI tests must set `search_path` to match real-world usage patterns
+
 ### Regression Testing Rules
 
 1. **Security-related behavior must always be regression-tested**:
