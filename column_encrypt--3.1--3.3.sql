@@ -383,8 +383,9 @@ DECLARE
     v_count BIGINT := 0;
     v_batch BIGINT;
     -- Effective role: honors SET ROLE if used, otherwise falls back to session_user.
-    v_effective_role NAME := pg_catalog.COALESCE(
-        pg_catalog.NULLIF(pg_catalog.NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
+    -- Note: COALESCE/NULLIF are SQL constructs, not pg_catalog functions.
+    v_effective_role NAME := COALESCE(
+        NULLIF(NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
         pg_catalog.session_user()
     );
 BEGIN
@@ -507,8 +508,9 @@ DECLARE
     v_col_type TEXT;
     rec RECORD;
     -- Effective role: honors SET ROLE if used, otherwise falls back to session_user.
-    v_effective_role NAME := pg_catalog.COALESCE(
-        pg_catalog.NULLIF(pg_catalog.NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
+    -- Note: COALESCE/NULLIF are SQL constructs, not pg_catalog functions.
+    v_effective_role NAME := COALESCE(
+        NULLIF(NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
         pg_catalog.session_user()
     );
 BEGIN

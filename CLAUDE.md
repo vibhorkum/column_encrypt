@@ -58,14 +58,21 @@ When SECURITY DEFINER functions need to check caller privileges:
 2. **Do NOT use `session_user` alone**: It ignores `SET ROLE` privilege reduction
 3. **Use the effective role pattern**:
    ```sql
-   v_effective_role NAME := pg_catalog.COALESCE(
-       pg_catalog.NULLIF(pg_catalog.NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
+   -- COALESCE/NULLIF are SQL constructs, NOT pg_catalog functions.
+   -- Only use pg_catalog. prefix for actual functions like current_setting().
+   v_effective_role NAME := COALESCE(
+       NULLIF(NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
        pg_catalog.session_user()
    );
    ```
    This honors `SET ROLE` if used, otherwise falls back to `session_user`.
 
-4. **Why this matters**:
+4. **SQL constructs vs pg_catalog functions**:
+   - `COALESCE`, `NULLIF`, `CASE`, `CAST` are SQL language constructs, not functions
+   - Do NOT prefix them with `pg_catalog.` — it causes "function does not exist" errors
+   - DO prefix actual functions like `current_setting()`, `session_user()`, `format()`
+
+5. **Why this matters**:
    - User A does `SET ROLE restricted_role` → expects operations authorized as restricted_role
    - Using `session_user()` alone would check A's privileges, bypassing the restriction
    - The effective role pattern correctly checks restricted_role's privileges

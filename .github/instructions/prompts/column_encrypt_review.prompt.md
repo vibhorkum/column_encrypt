@@ -261,9 +261,11 @@ Pay extra attention to:
 
 **The effective role pattern used here:**
 ```sql
+-- COALESCE/NULLIF are SQL constructs, NOT pg_catalog functions.
+-- Do NOT use pg_catalog.COALESCE or pg_catalog.NULLIF - they don't exist!
 v_effective_role := COALESCE(
-    NULLIF(NULLIF(current_setting('role', true), ''), 'none'),
-    session_user()
+    NULLIF(NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
+    pg_catalog.session_user()
 );
 ```
 

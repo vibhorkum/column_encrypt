@@ -61,6 +61,11 @@ This honors `SET ROLE` privilege reduction while preventing escalation.
 - Do NOT suggest using `session_user` alone — it ignores SET ROLE
 - The effective role pattern IS correct for this codebase
 
+**SQL constructs vs pg_catalog functions:**
+- `COALESCE`, `NULLIF`, `CASE`, `CAST` are SQL language constructs, not functions
+- Do NOT prefix them with `pg_catalog.` — it causes "function does not exist" errors
+- DO prefix actual functions: `pg_catalog.current_setting()`, `pg_catalog.session_user()`
+
 ## Code Review Checklist
 
 ### Security (CRITICAL)
