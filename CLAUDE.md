@@ -120,6 +120,44 @@ When modifying SQL functions:
     - STABLE: Catalog lookups OK, same result within transaction
     - VOLATILE: External state changes, non-deterministic results
 
+### Upgrade Script Rules
+
+1. **Never assume objects exist in a specific schema**:
+   - Use `@extschema@` for all extension object references
+   - Never hardcode `public.` or `encrypt.` schema names
+   - The control file `schema = encrypt` determines the actual schema
+
+2. **DO blocks must use dynamic schema lookup**:
+   - Cannot use `@extschema@` inside anonymous DO blocks
+   - Look up schema dynamically from `pg_extension`:
+     ```sql
+     DO $$
+     DECLARE
+         v_extschema text;
+     BEGIN
+         SELECT n.nspname INTO v_extschema
+           FROM pg_extension e
+           JOIN pg_namespace n ON n.oid = e.extnamespace
+          WHERE e.extname = 'column_encrypt';
+         -- Use format('%I.table_name', v_extschema) for table references
+     END;
+     $$;
+     ```
+
+3. **CI must create the extension schema before v2.0/v3.x installs**:
+   - The control file specifies `schema = encrypt`
+   - Run `CREATE SCHEMA IF NOT EXISTS encrypt;` before `CREATE EXTENSION`
+   - Use schema-qualified function names in `has_function_privilege()` checks
+
+4. **Upgrade scripts must include the `_pgcrypto_schema()` helper**:
+   - If upgrade script creates functions that call pgcrypto, include the helper
+   - The helper allows dynamic lookup of pgcrypto's actual schema
+
+5. **All SECURITY DEFINER functions in upgrades must use `pg_catalog` search_path**:
+   - Never use `SET search_path TO public` (security vulnerability)
+   - Use `SET search_path TO pg_catalog`
+   - Schema-qualify all table/function references
+
 ### Documentation Rules
 
 1. **Do not document superuser-only GUCs as standard user workflows**:
