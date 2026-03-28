@@ -451,6 +451,7 @@ DECLARE
     v_count BIGINT := 0;
     v_batch BIGINT;
     -- Effective role: honors SET ROLE if used, otherwise falls back to session_user.
+    -- This ensures privilege checks respect role-switching while preventing escalation.
     -- Note: COALESCE/NULLIF are SQL constructs, not pg_catalog functions.
     v_effective_role NAME := COALESCE(
         NULLIF(NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
