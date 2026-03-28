@@ -216,6 +216,13 @@ When modifying SQL functions:
    - Example: `loaded_cipher_key_versions()` is user-accessible for session introspection
    - Keep comments honest to avoid confusion during security reviews
 
+5. **Distinguish SQL upgrade mechanics from operational migration guidance**:
+   - PostgreSQL can chain intermediate upgrade scripts automatically (e.g., 3.1→3.3→4.0 in one command)
+   - Do NOT write "you cannot upgrade directly from X to Z" when intermediate scripts exist
+   - Instead, explain that while technically possible, staged migration is recommended
+   - Clearly state WHY staged migration matters (e.g., deprecation period for code updates)
+   - Use "we recommend" or "operationally, you should" rather than false technical claims
+
 ### Regression Testing Rules
 
 1. **Security-related behavior must always be regression-tested**:

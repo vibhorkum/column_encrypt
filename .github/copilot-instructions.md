@@ -157,6 +157,23 @@ before installing the extension.
 Install scripts (like `column_encrypt--4.0.sql`) do not include `CREATE SCHEMA`
 because the schema is expected to already exist.
 
+### PostgreSQL Extension Upgrade Mechanics
+
+**Key fact**: PostgreSQL can automatically chain intermediate upgrade scripts when running
+`ALTER EXTENSION ... UPDATE TO 'target'`. For example, with scripts `3.1--3.3.sql` and
+`3.3--4.0.sql`, running `ALTER EXTENSION column_encrypt UPDATE TO '4.0'` from v3.1 will
+automatically execute both scripts in sequence.
+
+**When reviewing migration/upgrade documentation**:
+- Do NOT flag "staged migration" as incorrect just because PostgreSQL can chain scripts
+- Staged migration recommendations are **operational guidance**, not technical limitations
+- v3.3 is a deprecation release — the intent is for users to stay there and update app code
+- The reason to recommend staging is application compatibility, not SQL command capability
+
+**Correct framing**:
+- WRONG: "You cannot upgrade directly from 3.1 to 4.0"
+- RIGHT: "While PostgreSQL can chain upgrades automatically, we recommend staged migration..."
+
 ### Before Suggesting a Fix
 
 Ask yourself:

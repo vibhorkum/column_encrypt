@@ -10,7 +10,14 @@ v4.0 is a major simplification that removes deprecated features and provides a c
 v3.1 → v3.3 (deprecation release) → v4.0 (clean release)
 ```
 
-**Important**: You cannot upgrade directly from v3.1 to v4.0. You must go through v3.3 first.
+**Note on upgrade mechanics**: PostgreSQL can technically execute intermediate upgrade scripts automatically. Running `ALTER EXTENSION column_encrypt UPDATE TO '4.0'` from v3.1 will chain through v3.3 in a single command.
+
+**However**, we strongly recommend the **staged approach** documented below:
+- **v3.3** is a deprecation release that keeps the old API working alongside the new `encrypt.*` API
+- This gives you time to update your application code and role grants
+- **v4.0** removes all deprecated functions — any code still using the old API will break immediately
+
+Skipping directly to v4.0 is technically possible but operationally risky unless your application already uses only the `encrypt.*` API.
 
 ## What's Removed in v4.0
 
