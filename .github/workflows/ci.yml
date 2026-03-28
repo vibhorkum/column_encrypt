@@ -293,11 +293,13 @@ jobs:
 
           # Setup upgraded database (3.3 -> 4.0)
           psql -h /tmp -p $PGPORT -d db_upgraded -c "CREATE EXTENSION pgcrypto;"
+          psql -h /tmp -p $PGPORT -d db_upgraded -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
           psql -h /tmp -p $PGPORT -d db_upgraded -c "CREATE EXTENSION column_encrypt VERSION '3.3';"
           psql -h /tmp -p $PGPORT -d db_upgraded -c "ALTER EXTENSION column_encrypt UPDATE TO '4.0';"
 
           # Setup fresh database (direct 4.0)
           psql -h /tmp -p $PGPORT -d db_fresh -c "CREATE EXTENSION pgcrypto;"
+          psql -h /tmp -p $PGPORT -d db_fresh -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
           psql -h /tmp -p $PGPORT -d db_fresh -c "CREATE EXTENSION column_encrypt VERSION '4.0';"
 
           # Compare function bodies for all encrypt.* functions

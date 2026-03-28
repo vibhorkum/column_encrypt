@@ -198,6 +198,12 @@ When modifying SQL functions:
    - Either show `search_path` setup OR use schema-qualified names (`encrypt.encrypted_text`)
    - CI tests must set `search_path` to match real-world usage patterns
 
+4. **SQL section headers must match actual grants**:
+   - If a function is granted to `column_encrypt_user`, do not label it as "internal" or "not exposed"
+   - Distinguish between truly internal functions (no grants) and user-accessible helpers
+   - Example: `loaded_cipher_key_versions()` is user-accessible for session introspection
+   - Keep comments honest to avoid confusion during security reviews
+
 ### Regression Testing Rules
 
 1. **Security-related behavior must always be regression-tested**:

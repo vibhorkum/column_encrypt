@@ -168,21 +168,26 @@ CREATE CAST (bytea AS encrypted_bytea) WITH INOUT AS ASSIGNMENT;
 
 /*
  * =============================================================================
- * INTERNAL FUNCTIONS (not exposed to users)
+ * INTERNAL HELPER FUNCTIONS
  * =============================================================================
+ * These are low-level C functions used by the public API.
+ * - enc_* functions: truly internal, not granted to any role
+ * - loaded_cipher_key_versions(): user-accessible introspection function
+ *   (granted to column_encrypt_user for session key inspection)
  */
 
--- Key version extraction
+-- Key version extraction (internal)
 CREATE FUNCTION enc_key_version(encrypted_text) RETURNS integer
     LANGUAGE c IMMUTABLE STRICT AS 'column_encrypt', 'enc_key_version_text';
 
 CREATE FUNCTION enc_key_version(encrypted_bytea) RETURNS integer
     LANGUAGE c IMMUTABLE STRICT AS 'column_encrypt', 'enc_key_version_bytea';
 
--- Session keyring management (internal)
+-- Session keyring introspection (user-accessible)
 CREATE FUNCTION loaded_cipher_key_versions() RETURNS integer[]
     LANGUAGE c STABLE AS 'column_encrypt', 'enc_loaded_key_versions';
 
+-- Session keyring management (internal - used by load_key/unload_key)
 CREATE FUNCTION enc_store_key(text, text) RETURNS boolean
     LANGUAGE c STRICT AS 'column_encrypt', 'enc_store_key';
 
@@ -192,7 +197,7 @@ CREATE FUNCTION enc_rm_key() RETURNS boolean
 CREATE FUNCTION pgstat_actv_mask() RETURNS void
     LANGUAGE c STABLE STRICT AS 'column_encrypt', 'pgstat_actv_mask';
 
--- Revoke public access to internal functions
+-- Revoke public access (grants to column_encrypt_user are in ROLE section below)
 REVOKE EXECUTE ON FUNCTION enc_store_key(text, text) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION enc_rm_key() FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION pgstat_actv_mask() FROM PUBLIC;
@@ -851,6 +856,7 @@ GRANT EXECUTE ON FUNCTION verify(TEXT, TEXT, TEXT, INTEGER) TO column_encrypt_us
 GRANT EXECUTE ON FUNCTION keys() TO column_encrypt_user;
 GRANT EXECUTE ON FUNCTION status() TO column_encrypt_user;
 GRANT EXECUTE ON FUNCTION blind_index(TEXT, TEXT) TO column_encrypt_user;
+-- Session introspection helper (see INTERNAL HELPER FUNCTIONS section)
 GRANT EXECUTE ON FUNCTION loaded_cipher_key_versions() TO column_encrypt_user;
 
 -- Revoke PUBLIC access to encrypt schema functions
