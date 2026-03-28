@@ -103,6 +103,8 @@ jobs:
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
             -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
+            -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
             -c "CREATE EXTENSION column_encrypt VERSION '2.0';"
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
             -c "ALTER EXTENSION column_encrypt UPDATE TO '3.0';"
@@ -121,15 +123,15 @@ jobs:
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
             -c "SELECT extversion FROM pg_extension WHERE extname = 'column_encrypt';" | grep -Fx '3.0'
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
-            -c "SELECT has_function_privilege('upgrade_admin', 'register_cipher_key(text,text,text)', 'EXECUTE');" | grep -Fx 't'
+            -c "SELECT has_function_privilege('upgrade_admin', 'encrypt.register_cipher_key(text,text,text)', 'EXECUTE');" | grep -Fx 't'
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
-            -c "SELECT has_function_privilege('upgrade_runtime', 'load_key(text)', 'EXECUTE');" | grep -Fx 't'
+            -c "SELECT has_function_privilege('upgrade_runtime', 'encrypt.load_key(text)', 'EXECUTE');" | grep -Fx 't'
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
-            -c "SELECT has_function_privilege('upgrade_runtime', 'loaded_cipher_key_versions()', 'EXECUTE');" | grep -Fx 't'
+            -c "SELECT has_function_privilege('upgrade_runtime', 'encrypt.loaded_cipher_key_versions()', 'EXECUTE');" | grep -Fx 't'
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
-            -c "SELECT has_function_privilege('upgrade_reader', 'cipher_key_versions()', 'EXECUTE');" | grep -Fx 't'
+            -c "SELECT has_function_privilege('upgrade_reader', 'encrypt.cipher_key_versions()', 'EXECUTE');" | grep -Fx 't'
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
-            -c "SELECT has_function_privilege('public', 'load_key(text)', 'EXECUTE');" | grep -Fx 'f'
+            -c "SELECT has_function_privilege('public', 'encrypt.load_key(text)', 'EXECUTE');" | grep -Fx 'f'
           pg_ctl -D "$PGDATA" stop
 
       - name: Verify 3.1 to 3.3 upgrade path (deprecation release)

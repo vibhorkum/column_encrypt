@@ -5,54 +5,62 @@
 SET check_function_bodies TO off;
 
 DO $$
+DECLARE
+    v_extschema text;
 BEGIN
+    -- Get the extension's schema dynamically
+    SELECT n.nspname INTO v_extschema
+      FROM pg_extension e
+      JOIN pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'column_encrypt';
+
     IF NOT EXISTS (
         SELECT 1
           FROM information_schema.columns
-         WHERE table_schema = 'public'
+         WHERE table_schema = v_extschema
            AND table_name = 'cipher_key_table'
            AND column_name = 'key_version'
     ) THEN
-        EXECUTE 'ALTER TABLE public.cipher_key_table ADD COLUMN key_version integer';
+        EXECUTE format('ALTER TABLE %I.cipher_key_table ADD COLUMN key_version integer', v_extschema);
     END IF;
 
     IF EXISTS (
         SELECT 1
           FROM information_schema.columns
-         WHERE table_schema = 'public'
+         WHERE table_schema = v_extschema
            AND table_name = 'cipher_key_table'
            AND column_name = 'key'
     ) AND NOT EXISTS (
         SELECT 1
           FROM information_schema.columns
-         WHERE table_schema = 'public'
+         WHERE table_schema = v_extschema
            AND table_name = 'cipher_key_table'
            AND column_name = 'wrapped_key'
     ) THEN
-        EXECUTE 'ALTER TABLE public.cipher_key_table RENAME COLUMN key TO wrapped_key';
+        EXECUTE format('ALTER TABLE %I.cipher_key_table RENAME COLUMN key TO wrapped_key', v_extschema);
     ELSIF EXISTS (
         SELECT 1
           FROM information_schema.columns
-         WHERE table_schema = 'public'
+         WHERE table_schema = v_extschema
            AND table_name = 'cipher_key_table'
            AND column_name = 'key'
     ) THEN
-        EXECUTE 'ALTER TABLE public.cipher_key_table ADD COLUMN IF NOT EXISTS wrapped_key bytea';
-        EXECUTE 'UPDATE public.cipher_key_table SET wrapped_key = COALESCE(wrapped_key, key)';
-        EXECUTE 'ALTER TABLE public.cipher_key_table DROP COLUMN key';
+        EXECUTE format('ALTER TABLE %I.cipher_key_table ADD COLUMN IF NOT EXISTS wrapped_key bytea', v_extschema);
+        EXECUTE format('UPDATE %I.cipher_key_table SET wrapped_key = COALESCE(wrapped_key, key)', v_extschema);
+        EXECUTE format('ALTER TABLE %I.cipher_key_table DROP COLUMN key', v_extschema);
     ELSIF NOT EXISTS (
         SELECT 1
           FROM information_schema.columns
-         WHERE table_schema = 'public'
+         WHERE table_schema = v_extschema
            AND table_name = 'cipher_key_table'
            AND column_name = 'wrapped_key'
     ) THEN
-        EXECUTE 'ALTER TABLE public.cipher_key_table ADD COLUMN wrapped_key bytea';
+        EXECUTE format('ALTER TABLE %I.cipher_key_table ADD COLUMN wrapped_key bytea', v_extschema);
     END IF;
 END;
 $$;
 
-ALTER TABLE public.cipher_key_table
+ALTER TABLE @extschema@.cipher_key_table
     ADD COLUMN IF NOT EXISTS key_state text,
     ADD COLUMN IF NOT EXISTS created_at timestamptz,
     ADD COLUMN IF NOT EXISTS state_changed_at timestamptz,
@@ -61,14 +69,14 @@ ALTER TABLE public.cipher_key_table
     ADD COLUMN IF NOT EXISTS last_used_at timestamptz,
     ADD COLUMN IF NOT EXISTS use_count bigint;
 
-UPDATE public.cipher_key_table
+UPDATE @extschema@.cipher_key_table
    SET key_version = COALESCE(key_version, 1),
        key_state = COALESCE(key_state, 'active'),
        created_at = COALESCE(created_at, now()),
        state_changed_at = COALESCE(state_changed_at, created_at, now()),
        use_count = COALESCE(use_count, 0);
 
-ALTER TABLE public.cipher_key_table
+ALTER TABLE @extschema@.cipher_key_table
     ALTER COLUMN key_version SET DEFAULT 1,
     ALTER COLUMN key_version SET NOT NULL,
     ALTER COLUMN wrapped_key SET NOT NULL,
@@ -82,52 +90,63 @@ ALTER TABLE public.cipher_key_table
     ALTER COLUMN use_count SET NOT NULL;
 
 DO $$
+DECLARE
+    v_extschema text;
 BEGIN
+    -- Get the extension's schema dynamically
+    SELECT n.nspname INTO v_extschema
+      FROM pg_extension e
+      JOIN pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'column_encrypt';
+
     IF NOT EXISTS (
         SELECT 1
-          FROM pg_constraint
-         WHERE conrelid = 'public.cipher_key_table'::regclass
-           AND contype = 'p'
+          FROM pg_constraint c
+          JOIN pg_class rel ON rel.oid = c.conrelid
+          JOIN pg_namespace n ON n.oid = rel.relnamespace
+         WHERE n.nspname = v_extschema
+           AND rel.relname = 'cipher_key_table'
+           AND c.contype = 'p'
     ) THEN
-        EXECUTE 'ALTER TABLE public.cipher_key_table ADD CONSTRAINT cipher_key_table_pkey PRIMARY KEY (key_version)';
+        EXECUTE format('ALTER TABLE %I.cipher_key_table ADD CONSTRAINT cipher_key_table_pkey PRIMARY KEY (key_version)', v_extschema);
     END IF;
 END;
 $$;
 
-ALTER TABLE public.cipher_key_table
+ALTER TABLE @extschema@.cipher_key_table
     DROP CONSTRAINT IF EXISTS cipher_key_table_key_state_check;
 
-ALTER TABLE public.cipher_key_table
+ALTER TABLE @extschema@.cipher_key_table
     ADD CONSTRAINT cipher_key_table_key_state_check
     CHECK (key_state IN ('pending', 'active', 'retired', 'revoked'));
 
 /* Add upper bound constraint on key_version to match ciphertext header/GUC limit */
-ALTER TABLE public.cipher_key_table
+ALTER TABLE @extschema@.cipher_key_table
     DROP CONSTRAINT IF EXISTS cipher_key_table_key_version_check;
 
-ALTER TABLE public.cipher_key_table
+ALTER TABLE @extschema@.cipher_key_table
     ADD CONSTRAINT cipher_key_table_key_version_check
     CHECK (key_version > 0 AND key_version <= 32767);
 
 CREATE INDEX IF NOT EXISTS cipher_key_table_algo_idx
-    ON public.cipher_key_table(algorithm);
+    ON @extschema@.cipher_key_table(algorithm);
 
-DROP INDEX IF EXISTS public.cipher_key_table_single_active_idx;
+DROP INDEX IF EXISTS @extschema@.cipher_key_table_single_active_idx;
 CREATE UNIQUE INDEX cipher_key_table_single_active_idx
-    ON public.cipher_key_table ((1))
+    ON @extschema@.cipher_key_table ((1))
     WHERE key_state = 'active';
 
-REVOKE ALL ON TABLE public.cipher_key_table FROM PUBLIC;
-ALTER TABLE public.cipher_key_table ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS cipher_key_table_superuser_only ON public.cipher_key_table;
-CREATE POLICY cipher_key_table_superuser_only ON public.cipher_key_table
+REVOKE ALL ON TABLE @extschema@.cipher_key_table FROM PUBLIC;
+ALTER TABLE @extschema@.cipher_key_table ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS cipher_key_table_superuser_only ON @extschema@.cipher_key_table;
+CREATE POLICY cipher_key_table_superuser_only ON @extschema@.cipher_key_table
     FOR ALL
     TO PUBLIC
     USING (false)
     WITH CHECK (false);
 
 /* Create audit log table if not exists */
-CREATE TABLE IF NOT EXISTS public.cipher_key_audit_log (
+CREATE TABLE IF NOT EXISTS @extschema@.cipher_key_audit_log (
     id bigserial PRIMARY KEY,
     operation text NOT NULL,
     key_version integer,
@@ -137,14 +156,14 @@ CREATE TABLE IF NOT EXISTS public.cipher_key_audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS cipher_key_audit_log_key_version_idx
-    ON public.cipher_key_audit_log(key_version);
+    ON @extschema@.cipher_key_audit_log(key_version);
 CREATE INDEX IF NOT EXISTS cipher_key_audit_log_performed_at_idx
-    ON public.cipher_key_audit_log(performed_at);
+    ON @extschema@.cipher_key_audit_log(performed_at);
 
-REVOKE ALL ON TABLE public.cipher_key_audit_log FROM PUBLIC;
-ALTER TABLE public.cipher_key_audit_log ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS cipher_key_audit_log_superuser_only ON public.cipher_key_audit_log;
-CREATE POLICY cipher_key_audit_log_superuser_only ON public.cipher_key_audit_log
+REVOKE ALL ON TABLE @extschema@.cipher_key_audit_log FROM PUBLIC;
+ALTER TABLE @extschema@.cipher_key_audit_log ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS cipher_key_audit_log_superuser_only ON @extschema@.cipher_key_audit_log;
+CREATE POLICY cipher_key_audit_log_superuser_only ON @extschema@.cipher_key_audit_log
     FOR ALL
     TO PUBLIC
     USING (false)
@@ -164,23 +183,23 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.enc_key_version(public.encrypted_text);
+DROP FUNCTION IF EXISTS @extschema@.enc_key_version(@extschema@.encrypted_text);
 CREATE FUNCTION enc_key_version(encrypted_text) RETURNS integer
 LANGUAGE c IMMUTABLE STRICT
 AS 'column_encrypt', 'enc_key_version_text';
 
-DROP FUNCTION IF EXISTS public.enc_key_version(public.encrypted_bytea);
+DROP FUNCTION IF EXISTS @extschema@.enc_key_version(@extschema@.encrypted_bytea);
 CREATE FUNCTION enc_key_version(encrypted_bytea) RETURNS integer
 LANGUAGE c IMMUTABLE STRICT
 AS 'column_encrypt', 'enc_key_version_bytea';
 
-DROP FUNCTION IF EXISTS public.loaded_cipher_key_versions();
+DROP FUNCTION IF EXISTS @extschema@.loaded_cipher_key_versions();
 CREATE FUNCTION loaded_cipher_key_versions() RETURNS integer[]
 LANGUAGE c STABLE
 AS 'column_encrypt', 'enc_loaded_key_versions';
 
-ALTER FUNCTION public.enc_hash_encbytea(public.encrypted_bytea) STABLE;
-ALTER FUNCTION public.enc_hash_enctext(public.encrypted_text) STABLE;
+ALTER FUNCTION @extschema@.enc_hash_encbytea(@extschema@.encrypted_bytea) STABLE;
+ALTER FUNCTION @extschema@.enc_hash_enctext(@extschema@.encrypted_text) STABLE;
 
 CREATE OR REPLACE FUNCTION cipher_key_disable_log() RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
@@ -202,8 +221,8 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.register_cipher_key(text, text, text, integer, boolean, timestamptz, text);
-DROP FUNCTION IF EXISTS public.register_cipher_key(text, text, text, integer, boolean);
+DROP FUNCTION IF EXISTS @extschema@.register_cipher_key(text, text, text, integer, boolean, timestamptz, text);
+DROP FUNCTION IF EXISTS @extschema@.register_cipher_key(text, text, text, integer, boolean);
 CREATE FUNCTION register_cipher_key(
     cipher_key text,
     cipher_algorithm text,
@@ -368,7 +387,7 @@ BEGIN
 END;
 $_$;
 
-DROP FUNCTION IF EXISTS public.load_key_by_version(text, integer);
+DROP FUNCTION IF EXISTS @extschema@.load_key_by_version(text, integer);
 CREATE FUNCTION load_key_by_version(text, integer) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO public
@@ -437,7 +456,7 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.activate_cipher_key(integer);
+DROP FUNCTION IF EXISTS @extschema@.activate_cipher_key(integer);
 CREATE FUNCTION activate_cipher_key(integer) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO public
@@ -513,7 +532,7 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.revoke_cipher_key(integer);
+DROP FUNCTION IF EXISTS @extschema@.revoke_cipher_key(integer);
 CREATE FUNCTION revoke_cipher_key(integer) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO public
@@ -551,7 +570,7 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.cipher_key_versions();
+DROP FUNCTION IF EXISTS @extschema@.cipher_key_versions();
 CREATE FUNCTION cipher_key_versions()
 RETURNS TABLE (
     key_version integer,
@@ -581,7 +600,7 @@ $$;
 /*
  * Function to check for and report expired keys
  */
-DROP FUNCTION IF EXISTS public.cipher_key_check_expired();
+DROP FUNCTION IF EXISTS @extschema@.cipher_key_check_expired();
 CREATE FUNCTION cipher_key_check_expired()
 RETURNS TABLE (
     key_version integer,
@@ -604,7 +623,7 @@ $$;
 /*
  * Function to view audit log (for admins)
  */
-DROP FUNCTION IF EXISTS public.cipher_key_audit_log_view(integer, integer);
+DROP FUNCTION IF EXISTS @extschema@.cipher_key_audit_log_view(integer, integer);
 CREATE FUNCTION cipher_key_audit_log_view(
     p_limit integer DEFAULT 100,
     p_key_version integer DEFAULT NULL
@@ -627,14 +646,14 @@ AS $$
      LIMIT p_limit;
 $$;
 
-DROP FUNCTION IF EXISTS public.column_encrypt_blind_index_text(text, text);
+DROP FUNCTION IF EXISTS @extschema@.column_encrypt_blind_index_text(text, text);
 CREATE FUNCTION column_encrypt_blind_index_text(text, text) RETURNS text
     LANGUAGE sql IMMUTABLE STRICT
 AS $$
     SELECT encode(hmac(convert_to($1, 'UTF8'), convert_to($2, 'UTF8'), 'sha256'), 'hex');
 $$;
 
-DROP FUNCTION IF EXISTS public.column_encrypt_blind_index_bytea(bytea, text);
+DROP FUNCTION IF EXISTS @extschema@.column_encrypt_blind_index_bytea(bytea, text);
 CREATE FUNCTION column_encrypt_blind_index_bytea(bytea, text) RETURNS text
     LANGUAGE sql IMMUTABLE STRICT
 AS $$
@@ -697,7 +716,7 @@ BEGIN
 END;
 $_$;
 
-DROP FUNCTION IF EXISTS public.cipher_key_reencrypt_data_batch(text, text, text, integer);
+DROP FUNCTION IF EXISTS @extschema@.cipher_key_reencrypt_data_batch(text, text, text, integer);
 CREATE FUNCTION cipher_key_reencrypt_data_batch(text, text, text, integer) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO public
@@ -760,7 +779,7 @@ BEGIN
 END;
 $_$;
 
-DROP FUNCTION IF EXISTS public.cipher_key_reencrypt_data(text, text, text, integer);
+DROP FUNCTION IF EXISTS @extschema@.cipher_key_reencrypt_data(text, text, text, integer);
 CREATE FUNCTION cipher_key_reencrypt_data(text, text, text, integer) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO public
@@ -782,7 +801,7 @@ $$;
 /*
  * Function to verify that encrypted data in a column can be decrypted
  */
-DROP FUNCTION IF EXISTS public.cipher_verify_column_encryption(text, text, text, integer);
+DROP FUNCTION IF EXISTS @extschema@.cipher_verify_column_encryption(text, text, text, integer);
 CREATE FUNCTION cipher_verify_column_encryption(text, text, text, integer DEFAULT 1000)
 RETURNS TABLE (
     check_name text,
@@ -935,7 +954,7 @@ BEGIN
 END;
 $_$;
 
-DROP FUNCTION IF EXISTS public.cipher_key_logical_replication_check(text, text);
+DROP FUNCTION IF EXISTS @extschema@.cipher_key_logical_replication_check(text, text);
 CREATE FUNCTION cipher_key_logical_replication_check(text, text)
 RETURNS TABLE (
     severity text,
