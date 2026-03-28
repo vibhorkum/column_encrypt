@@ -149,11 +149,27 @@ When modifying SQL functions:
    - Run `CREATE SCHEMA IF NOT EXISTS encrypt;` before `CREATE EXTENSION`
    - Use schema-qualified function names in `has_function_privilege()` checks
 
-4. **Upgrade scripts must include the `_pgcrypto_schema()` helper**:
+4. **Upgrade scripts must NOT use `CREATE SCHEMA IF NOT EXISTS`**:
+   - PostgreSQL's `CREATE SCHEMA IF NOT EXISTS` fails with "schema is not a member of
+     extension" when the schema was pre-created externally (not by extension)
+   - With `relocatable = false` + `schema = encrypt`, users must pre-create the schema
+   - Use conditional DO block instead:
+     ```sql
+     DO $$
+     BEGIN
+         IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'encrypt') THEN
+             CREATE SCHEMA encrypt;
+         END IF;
+     END;
+     $$;
+     ```
+   - This handles both upgrade (schema may not exist) and fresh install (user pre-created) scenarios
+
+5. **Upgrade scripts must include the `_pgcrypto_schema()` helper**:
    - If upgrade script creates functions that call pgcrypto, include the helper
    - The helper allows dynamic lookup of pgcrypto's actual schema
 
-5. **All SECURITY DEFINER functions in upgrades must use `pg_catalog` search_path**:
+6. **All SECURITY DEFINER functions in upgrades must use `pg_catalog` search_path**:
    - Never use `SET search_path TO public` (security vulnerability)
    - Use `SET search_path TO pg_catalog`
    - Schema-qualify all table/function references

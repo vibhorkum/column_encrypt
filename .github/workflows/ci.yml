@@ -102,6 +102,10 @@ jobs:
           createdb test_column_encrypt_upgrade
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
             -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          # Pre-create encrypt schema: required because control file has
+          # schema = encrypt with relocatable = false. PostgreSQL does NOT
+          # auto-create the schema. The extension's v3.3.sql uses conditional
+          # logic to handle the case where schema already exists externally.
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
             -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \

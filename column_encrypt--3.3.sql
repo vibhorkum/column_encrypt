@@ -2317,7 +2317,19 @@ GRANT EXECUTE ON FUNCTION cipher_rotation_progress() TO column_encrypt_reader;
  * =============================================================================
  */
 
-CREATE SCHEMA IF NOT EXISTS encrypt;
+-- Conditionally create schema if it doesn't exist.
+-- Cannot use CREATE SCHEMA IF NOT EXISTS because it fails when schema
+-- was pre-created externally (not by extension). With relocatable = false
+-- and schema = encrypt in control file, users must pre-create the schema,
+-- so this handles both upgrade (schema may not exist) and fresh install
+-- (schema was pre-created by user) scenarios.
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = 'encrypt') THEN
+        CREATE SCHEMA encrypt;
+    END IF;
+END;
+$$;
 
 COMMENT ON SCHEMA encrypt IS
     'Simplified API for column_encrypt extension (v3.3+)';
