@@ -35,6 +35,31 @@ encrypt.blind_index(value, hmac_key)               -- Searchable hash
 - **Log masking**: `emit_log_hook` masks sensitive function calls
 - **Single role**: `column_encrypt_user` for all operations
 - **SECURITY DEFINER**: All `encrypt.*` functions run as definer
+- **Effective role privilege checks**: `rotate()` and `verify()` honor `SET ROLE`
+
+## PostgreSQL Privilege Semantics
+
+**Critical concepts for reviewing privilege-related code:**
+
+| Identity | Meaning | Inside SECURITY DEFINER |
+|----------|---------|------------------------|
+| `session_user` | Login role (authenticated identity) | Same as outside |
+| `current_user` | Effective role | **Function owner** (not caller!) |
+| `current_setting('role', true)` | SET ROLE value | The role set by caller's SET ROLE |
+
+**This extension uses the "effective role" pattern:**
+```sql
+COALESCE(
+    NULLIF(NULLIF(current_setting('role', true), ''), 'none'),
+    session_user()
+)
+```
+This honors `SET ROLE` privilege reduction while preventing escalation.
+
+**When reviewing privilege checks:**
+- Do NOT suggest using `current_user` — it returns the function owner in SECURITY DEFINER
+- Do NOT suggest using `session_user` alone — it ignores SET ROLE
+- The effective role pattern IS correct for this codebase
 
 ## Code Review Checklist
 
@@ -58,6 +83,8 @@ encrypt.blind_index(value, hmac_key)               -- Searchable hash
 - [ ] Error cases tested (wrong passphrase, short key, etc.)
 - [ ] Session-scoped behavior verified (keys don't leak between sessions)
 - [ ] Upgrade path tested in CI
+- [ ] Privilege tests use tables owned by the test role (not superuser)
+- [ ] Tests under SET ROLE actually test the intended role's permissions
 
 ## Common Patterns
 

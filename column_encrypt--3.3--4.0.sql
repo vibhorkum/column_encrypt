@@ -450,6 +450,11 @@ DECLARE
     v_sql TEXT;
     v_count BIGINT := 0;
     v_batch BIGINT;
+    -- Effective role: honors SET ROLE if used, otherwise falls back to session_user.
+    v_effective_role NAME := pg_catalog.COALESCE(
+        pg_catalog.NULLIF(pg_catalog.NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
+        pg_catalog.session_user()
+    );
 BEGIN
     -- Use IS DISTINCT FROM to handle NULL when GUC is missing (missing_ok=true)
     IF current_setting('encrypt.enable', true) IS DISTINCT FROM 'on' THEN
@@ -487,9 +492,9 @@ BEGIN
         RAISE EXCEPTION 'not an encrypted column' USING ERRCODE = 'wrong_object_type';
     END IF;
 
-    -- Verify session_user has UPDATE privilege (prevent privilege escalation)
+    -- Verify effective role has UPDATE privilege (honors SET ROLE, prevents escalation)
     IF NOT pg_catalog.has_table_privilege(
-        pg_catalog.session_user(),
+        v_effective_role,
         pg_catalog.format('%I.%I', schema_name, table_name),
         'UPDATE'
     ) THEN
@@ -498,7 +503,7 @@ BEGIN
     END IF;
 
     IF NOT pg_catalog.has_column_privilege(
-        pg_catalog.session_user(),
+        v_effective_role,
         pg_catalog.format('%I.%I', schema_name, table_name),
         column_name,
         'UPDATE'
@@ -545,6 +550,11 @@ DECLARE
     v_ok BIGINT := 0;
     v_col_type TEXT;
     rec RECORD;
+    -- Effective role: honors SET ROLE if used, otherwise falls back to session_user.
+    v_effective_role NAME := pg_catalog.COALESCE(
+        pg_catalog.NULLIF(pg_catalog.NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
+        pg_catalog.session_user()
+    );
 BEGIN
     IF sample_size IS NULL OR sample_size <= 0 THEN
         RAISE EXCEPTION 'sample_size must be greater than 0'
@@ -567,9 +577,9 @@ BEGIN
         status := 'error'; message := 'not an encrypted column'; RETURN NEXT; RETURN;
     END IF;
 
-    -- Verify session_user has SELECT privilege (prevent privilege escalation)
+    -- Verify effective role has SELECT privilege (honors SET ROLE, prevents escalation)
     IF NOT pg_catalog.has_table_privilege(
-        pg_catalog.session_user(),
+        v_effective_role,
         pg_catalog.format('%I.%I', schema_name, table_name),
         'SELECT'
     ) THEN
@@ -577,7 +587,7 @@ BEGIN
     END IF;
 
     IF NOT pg_catalog.has_column_privilege(
-        pg_catalog.session_user(),
+        v_effective_role,
         pg_catalog.format('%I.%I', schema_name, table_name),
         column_name,
         'SELECT'

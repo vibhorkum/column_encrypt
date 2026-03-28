@@ -83,6 +83,10 @@ RESET ROLE;
 -- ENCRYPTED COLUMN USAGE
 -- =============================================================================
 
+-- Create tables as regress_user so privilege checks work correctly.
+-- (rotate/verify check the effective role's privileges, not superuser)
+SET ROLE regress_user;
+
 -- Test encrypted_text type
 CREATE TABLE test_enc_text (id serial, ssn encrypted_text);
 INSERT INTO test_enc_text(ssn) VALUES ('123-45-6789');
@@ -97,6 +101,8 @@ CREATE TABLE test_enc_bytea (id serial, data encrypted_bytea);
 INSERT INTO test_enc_bytea(data) VALUES ('hello'::bytea);
 INSERT INTO test_enc_bytea(data) VALUES ('world'::bytea);
 SELECT data FROM test_enc_bytea ORDER BY id;
+
+RESET ROLE;
 
 -- =============================================================================
 -- BLIND INDEX
@@ -206,12 +212,12 @@ SELECT data FROM test_enc_bytea ORDER BY id;
 -- BATCH ROTATION
 -- =============================================================================
 
+-- Create table as regress_user so privilege checks work correctly
+SET ROLE regress_user;
 CREATE TABLE test_batch_rotate (id integer PRIMARY KEY, val encrypted_text);
 INSERT INTO test_batch_rotate(id, val)
 SELECT gs, format('secret-%s', gs)
 FROM generate_series(1, 100) AS gs;
-
-SET ROLE regress_user;
 
 -- Register third key
 SELECT encrypt.register_key('my-data-encryption-key-v3', 'my-master-passphrase', false);

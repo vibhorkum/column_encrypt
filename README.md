@@ -282,7 +282,7 @@ All encryption functions are in the `encrypt` schema:
 | `encrypt.keys()` | `setof record` | Lists all registered keys with state and metadata. |
 | `encrypt.status()` | `record` | Returns quick status: key_loaded, active_key_version, encrypted_column_count. |
 | `encrypt.blind_index(value text, hmac_key text)` | `text` | Returns a SHA-256 HMAC blind index for searchable lookups. |
-| `loaded_cipher_key_versions()` | `integer[]` | Returns key versions currently loaded in session (metadata only). |
+| `encrypt.loaded_cipher_key_versions()` | `integer[]` | Returns key versions currently loaded in session (metadata only). |
 
 ---
 

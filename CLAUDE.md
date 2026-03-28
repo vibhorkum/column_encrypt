@@ -47,6 +47,28 @@ PostgreSQL must be running with `shared_preload_libraries = 'column_encrypt'` in
 3. **Session Isolation**: Keys loaded per-connection, cleared on disconnect
 4. **Log Protection**: Automatic masking of sensitive function calls
 5. **SECURITY DEFINER Safety**: All definer functions schema-qualify external calls
+6. **Effective Role Privilege Checks**: Functions like `rotate()` and `verify()` check
+   privileges against the effective role, honoring `SET ROLE` privilege reduction
+
+### Privilege Model for SECURITY DEFINER Functions
+
+When SECURITY DEFINER functions need to check caller privileges:
+
+1. **Do NOT use `current_user`**: Inside SECURITY DEFINER, `current_user` is the function owner
+2. **Do NOT use `session_user` alone**: It ignores `SET ROLE` privilege reduction
+3. **Use the effective role pattern**:
+   ```sql
+   v_effective_role NAME := pg_catalog.COALESCE(
+       pg_catalog.NULLIF(pg_catalog.NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
+       pg_catalog.session_user()
+   );
+   ```
+   This honors `SET ROLE` if used, otherwise falls back to `session_user`.
+
+4. **Why this matters**:
+   - User A does `SET ROLE restricted_role` → expects operations authorized as restricted_role
+   - Using `session_user()` alone would check A's privileges, bypassing the restriction
+   - The effective role pattern correctly checks restricted_role's privileges
 
 ### Security Guidelines for Contributors
 
