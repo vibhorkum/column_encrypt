@@ -5,54 +5,62 @@
 SET check_function_bodies TO off;
 
 DO $$
+DECLARE
+    v_extschema text;
 BEGIN
+    -- Get the extension's schema dynamically
+    SELECT n.nspname INTO v_extschema
+      FROM pg_extension e
+      JOIN pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'column_encrypt';
+
     IF NOT EXISTS (
         SELECT 1
           FROM information_schema.columns
-         WHERE table_schema = 'public'
+         WHERE table_schema = v_extschema
            AND table_name = 'cipher_key_table'
            AND column_name = 'key_version'
     ) THEN
-        EXECUTE 'ALTER TABLE public.cipher_key_table ADD COLUMN key_version integer';
+        EXECUTE format('ALTER TABLE %I.cipher_key_table ADD COLUMN key_version integer', v_extschema);
     END IF;
 
     IF EXISTS (
         SELECT 1
           FROM information_schema.columns
-         WHERE table_schema = 'public'
+         WHERE table_schema = v_extschema
            AND table_name = 'cipher_key_table'
            AND column_name = 'key'
     ) AND NOT EXISTS (
         SELECT 1
           FROM information_schema.columns
-         WHERE table_schema = 'public'
+         WHERE table_schema = v_extschema
            AND table_name = 'cipher_key_table'
            AND column_name = 'wrapped_key'
     ) THEN
-        EXECUTE 'ALTER TABLE public.cipher_key_table RENAME COLUMN key TO wrapped_key';
+        EXECUTE format('ALTER TABLE %I.cipher_key_table RENAME COLUMN key TO wrapped_key', v_extschema);
     ELSIF EXISTS (
         SELECT 1
           FROM information_schema.columns
-         WHERE table_schema = 'public'
+         WHERE table_schema = v_extschema
            AND table_name = 'cipher_key_table'
            AND column_name = 'key'
     ) THEN
-        EXECUTE 'ALTER TABLE public.cipher_key_table ADD COLUMN IF NOT EXISTS wrapped_key bytea';
-        EXECUTE 'UPDATE public.cipher_key_table SET wrapped_key = COALESCE(wrapped_key, key)';
-        EXECUTE 'ALTER TABLE public.cipher_key_table DROP COLUMN key';
+        EXECUTE format('ALTER TABLE %I.cipher_key_table ADD COLUMN IF NOT EXISTS wrapped_key bytea', v_extschema);
+        EXECUTE format('UPDATE %I.cipher_key_table SET wrapped_key = COALESCE(wrapped_key, key)', v_extschema);
+        EXECUTE format('ALTER TABLE %I.cipher_key_table DROP COLUMN key', v_extschema);
     ELSIF NOT EXISTS (
         SELECT 1
           FROM information_schema.columns
-         WHERE table_schema = 'public'
+         WHERE table_schema = v_extschema
            AND table_name = 'cipher_key_table'
            AND column_name = 'wrapped_key'
     ) THEN
-        EXECUTE 'ALTER TABLE public.cipher_key_table ADD COLUMN wrapped_key bytea';
+        EXECUTE format('ALTER TABLE %I.cipher_key_table ADD COLUMN wrapped_key bytea', v_extschema);
     END IF;
 END;
 $$;
 
-ALTER TABLE public.cipher_key_table
+ALTER TABLE @extschema@.cipher_key_table
     ADD COLUMN IF NOT EXISTS key_state text,
     ADD COLUMN IF NOT EXISTS created_at timestamptz,
     ADD COLUMN IF NOT EXISTS state_changed_at timestamptz,
@@ -61,14 +69,14 @@ ALTER TABLE public.cipher_key_table
     ADD COLUMN IF NOT EXISTS last_used_at timestamptz,
     ADD COLUMN IF NOT EXISTS use_count bigint;
 
-UPDATE public.cipher_key_table
+UPDATE @extschema@.cipher_key_table
    SET key_version = COALESCE(key_version, 1),
        key_state = COALESCE(key_state, 'active'),
        created_at = COALESCE(created_at, now()),
        state_changed_at = COALESCE(state_changed_at, created_at, now()),
        use_count = COALESCE(use_count, 0);
 
-ALTER TABLE public.cipher_key_table
+ALTER TABLE @extschema@.cipher_key_table
     ALTER COLUMN key_version SET DEFAULT 1,
     ALTER COLUMN key_version SET NOT NULL,
     ALTER COLUMN wrapped_key SET NOT NULL,
@@ -82,52 +90,63 @@ ALTER TABLE public.cipher_key_table
     ALTER COLUMN use_count SET NOT NULL;
 
 DO $$
+DECLARE
+    v_extschema text;
 BEGIN
+    -- Get the extension's schema dynamically
+    SELECT n.nspname INTO v_extschema
+      FROM pg_extension e
+      JOIN pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'column_encrypt';
+
     IF NOT EXISTS (
         SELECT 1
-          FROM pg_constraint
-         WHERE conrelid = 'public.cipher_key_table'::regclass
-           AND contype = 'p'
+          FROM pg_constraint c
+          JOIN pg_class rel ON rel.oid = c.conrelid
+          JOIN pg_namespace n ON n.oid = rel.relnamespace
+         WHERE n.nspname = v_extschema
+           AND rel.relname = 'cipher_key_table'
+           AND c.contype = 'p'
     ) THEN
-        EXECUTE 'ALTER TABLE public.cipher_key_table ADD CONSTRAINT cipher_key_table_pkey PRIMARY KEY (key_version)';
+        EXECUTE format('ALTER TABLE %I.cipher_key_table ADD CONSTRAINT cipher_key_table_pkey PRIMARY KEY (key_version)', v_extschema);
     END IF;
 END;
 $$;
 
-ALTER TABLE public.cipher_key_table
+ALTER TABLE @extschema@.cipher_key_table
     DROP CONSTRAINT IF EXISTS cipher_key_table_key_state_check;
 
-ALTER TABLE public.cipher_key_table
+ALTER TABLE @extschema@.cipher_key_table
     ADD CONSTRAINT cipher_key_table_key_state_check
     CHECK (key_state IN ('pending', 'active', 'retired', 'revoked'));
 
 /* Add upper bound constraint on key_version to match ciphertext header/GUC limit */
-ALTER TABLE public.cipher_key_table
+ALTER TABLE @extschema@.cipher_key_table
     DROP CONSTRAINT IF EXISTS cipher_key_table_key_version_check;
 
-ALTER TABLE public.cipher_key_table
+ALTER TABLE @extschema@.cipher_key_table
     ADD CONSTRAINT cipher_key_table_key_version_check
     CHECK (key_version > 0 AND key_version <= 32767);
 
 CREATE INDEX IF NOT EXISTS cipher_key_table_algo_idx
-    ON public.cipher_key_table(algorithm);
+    ON @extschema@.cipher_key_table(algorithm);
 
-DROP INDEX IF EXISTS public.cipher_key_table_single_active_idx;
+DROP INDEX IF EXISTS @extschema@.cipher_key_table_single_active_idx;
 CREATE UNIQUE INDEX cipher_key_table_single_active_idx
-    ON public.cipher_key_table ((1))
+    ON @extschema@.cipher_key_table ((1))
     WHERE key_state = 'active';
 
-REVOKE ALL ON TABLE public.cipher_key_table FROM PUBLIC;
-ALTER TABLE public.cipher_key_table ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS cipher_key_table_superuser_only ON public.cipher_key_table;
-CREATE POLICY cipher_key_table_superuser_only ON public.cipher_key_table
+REVOKE ALL ON TABLE @extschema@.cipher_key_table FROM PUBLIC;
+ALTER TABLE @extschema@.cipher_key_table ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS cipher_key_table_superuser_only ON @extschema@.cipher_key_table;
+CREATE POLICY cipher_key_table_superuser_only ON @extschema@.cipher_key_table
     FOR ALL
     TO PUBLIC
     USING (false)
     WITH CHECK (false);
 
 /* Create audit log table if not exists */
-CREATE TABLE IF NOT EXISTS public.cipher_key_audit_log (
+CREATE TABLE IF NOT EXISTS @extschema@.cipher_key_audit_log (
     id bigserial PRIMARY KEY,
     operation text NOT NULL,
     key_version integer,
@@ -137,14 +156,14 @@ CREATE TABLE IF NOT EXISTS public.cipher_key_audit_log (
 );
 
 CREATE INDEX IF NOT EXISTS cipher_key_audit_log_key_version_idx
-    ON public.cipher_key_audit_log(key_version);
+    ON @extschema@.cipher_key_audit_log(key_version);
 CREATE INDEX IF NOT EXISTS cipher_key_audit_log_performed_at_idx
-    ON public.cipher_key_audit_log(performed_at);
+    ON @extschema@.cipher_key_audit_log(performed_at);
 
-REVOKE ALL ON TABLE public.cipher_key_audit_log FROM PUBLIC;
-ALTER TABLE public.cipher_key_audit_log ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS cipher_key_audit_log_superuser_only ON public.cipher_key_audit_log;
-CREATE POLICY cipher_key_audit_log_superuser_only ON public.cipher_key_audit_log
+REVOKE ALL ON TABLE @extschema@.cipher_key_audit_log FROM PUBLIC;
+ALTER TABLE @extschema@.cipher_key_audit_log ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS cipher_key_audit_log_superuser_only ON @extschema@.cipher_key_audit_log;
+CREATE POLICY cipher_key_audit_log_superuser_only ON @extschema@.cipher_key_audit_log
     FOR ALL
     TO PUBLIC
     USING (false)
@@ -164,27 +183,43 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.enc_key_version(public.encrypted_text);
+DROP FUNCTION IF EXISTS @extschema@.enc_key_version(@extschema@.encrypted_text);
 CREATE FUNCTION enc_key_version(encrypted_text) RETURNS integer
 LANGUAGE c IMMUTABLE STRICT
 AS 'column_encrypt', 'enc_key_version_text';
 
-DROP FUNCTION IF EXISTS public.enc_key_version(public.encrypted_bytea);
+DROP FUNCTION IF EXISTS @extschema@.enc_key_version(@extschema@.encrypted_bytea);
 CREATE FUNCTION enc_key_version(encrypted_bytea) RETURNS integer
 LANGUAGE c IMMUTABLE STRICT
 AS 'column_encrypt', 'enc_key_version_bytea';
 
-DROP FUNCTION IF EXISTS public.loaded_cipher_key_versions();
+DROP FUNCTION IF EXISTS @extschema@.loaded_cipher_key_versions();
 CREATE FUNCTION loaded_cipher_key_versions() RETURNS integer[]
 LANGUAGE c STABLE
 AS 'column_encrypt', 'enc_loaded_key_versions';
 
-ALTER FUNCTION public.enc_hash_encbytea(public.encrypted_bytea) STABLE;
-ALTER FUNCTION public.enc_hash_enctext(public.encrypted_text) STABLE;
+ALTER FUNCTION @extschema@.enc_hash_encbytea(@extschema@.encrypted_bytea) STABLE;
+ALTER FUNCTION @extschema@.enc_hash_enctext(@extschema@.encrypted_text) STABLE;
+
+/*
+ * _pgcrypto_schema - Get the schema where pgcrypto is installed
+ * Used by SECURITY DEFINER functions to safely call pgcrypto functions.
+ */
+CREATE FUNCTION _pgcrypto_schema() RETURNS TEXT
+    LANGUAGE sql STABLE
+    SET search_path TO pg_catalog
+AS $$
+    SELECT n.nspname::text
+      FROM pg_catalog.pg_extension e
+      JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'pgcrypto';
+$$;
+
+REVOKE EXECUTE ON FUNCTION _pgcrypto_schema() FROM PUBLIC;
 
 CREATE OR REPLACE FUNCTION cipher_key_disable_log() RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 BEGIN
     SET track_activities = off;
@@ -194,7 +229,7 @@ $$;
 
 CREATE OR REPLACE FUNCTION cipher_key_enable_log() RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 BEGIN
     SET track_activities = DEFAULT;
@@ -202,8 +237,8 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.register_cipher_key(text, text, text, integer, boolean, timestamptz, text);
-DROP FUNCTION IF EXISTS public.register_cipher_key(text, text, text, integer, boolean);
+DROP FUNCTION IF EXISTS @extschema@.register_cipher_key(text, text, text, integer, boolean, timestamptz, text);
+DROP FUNCTION IF EXISTS @extschema@.register_cipher_key(text, text, text, integer, boolean);
 CREATE FUNCTION register_cipher_key(
     cipher_key text,
     cipher_algorithm text,
@@ -214,17 +249,20 @@ CREATE FUNCTION register_cipher_key(
     p_description text DEFAULT NULL
 ) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
+DECLARE
+    v_pgcrypto_schema text;
+    v_wrapped_key bytea;
 BEGIN
-    PERFORM pgstat_actv_mask();
+    PERFORM @extschema@.pgstat_actv_mask();
 
     IF cipher_key IS NULL OR cipher_key = '' THEN
         RAISE EXCEPTION 'EDB-ENC0002 new cipher key is invalid';
     END IF;
 
     /* DEK must be at least 16 bytes for AES-128 security */
-    IF octet_length(cipher_key) < 16 THEN
+    IF pg_catalog.octet_length(cipher_key) < 16 THEN
         RAISE EXCEPTION 'EDB-ENC0049 cipher key must be at least 16 bytes for cryptographic strength';
     END IF;
 
@@ -245,44 +283,55 @@ BEGIN
     END IF;
 
     /* validate expiration is in the future if provided */
-    IF p_expires_at IS NOT NULL AND p_expires_at <= now() THEN
+    IF p_expires_at IS NOT NULL AND p_expires_at <= pg_catalog.now() THEN
         RAISE EXCEPTION 'EDB-ENC0050 expiration time must be in the future';
     END IF;
 
-    LOCK TABLE cipher_key_table IN EXCLUSIVE MODE;
+    /* Look up pgcrypto schema dynamically */
+    v_pgcrypto_schema := @extschema@._pgcrypto_schema();
+    IF v_pgcrypto_schema IS NULL THEN
+        RAISE EXCEPTION 'pgcrypto extension is not installed';
+    END IF;
+
+    LOCK TABLE @extschema@.cipher_key_table IN EXCLUSIVE MODE;
 
     IF EXISTS (
-        SELECT 1 FROM cipher_key_table WHERE key_version = p_key_version
+        SELECT 1 FROM @extschema@.cipher_key_table WHERE key_version = p_key_version
     ) THEN
         RAISE EXCEPTION 'EDB-ENC0044 key version % is already registered', p_key_version;
     END IF;
 
     IF p_make_active THEN
-        UPDATE cipher_key_table
+        UPDATE @extschema@.cipher_key_table
            SET key_state = 'retired',
-               state_changed_at = now()
+               state_changed_at = pg_catalog.now()
          WHERE key_state = 'active';
     END IF;
 
-    INSERT INTO cipher_key_table(key_version, wrapped_key, algorithm, key_state, created_at, state_changed_at, expires_at, description)
+    /* Use dynamic SQL for pgcrypto to prevent search_path hijacking */
+    EXECUTE pg_catalog.format('SELECT %I.pgp_sym_encrypt($1, $2, $3)', v_pgcrypto_schema)
+       INTO v_wrapped_key
+      USING cipher_key, master_passphrase, 'cipher-algo=aes256, s2k-mode=3';
+
+    INSERT INTO @extschema@.cipher_key_table(key_version, wrapped_key, algorithm, key_state, created_at, state_changed_at, expires_at, description)
     VALUES (
         p_key_version,
-        pgp_sym_encrypt(cipher_key, master_passphrase, 'cipher-algo=aes256, s2k-mode=3'),
+        v_wrapped_key,
         cipher_algorithm,
         CASE WHEN p_make_active THEN 'active' ELSE 'pending' END,
-        now(),
-        now(),
+        pg_catalog.now(),
+        pg_catalog.now(),
         p_expires_at,
         p_description
     );
 
     /* Log the operation (non-fatal if logging fails) */
     BEGIN
-        INSERT INTO cipher_key_audit_log(operation, key_version, details)
+        INSERT INTO @extschema@.cipher_key_audit_log(operation, key_version, details)
         VALUES(
             'register',
             p_key_version,
-            jsonb_build_object(
+            pg_catalog.jsonb_build_object(
                 'make_active', p_make_active,
                 'expires_at', p_expires_at,
                 'description', p_description
@@ -300,14 +349,14 @@ $$;
 
 CREATE OR REPLACE FUNCTION register_cipher_key(text, text, text) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 BEGIN
-    RETURN register_cipher_key(
+    RETURN @extschema@.register_cipher_key(
         $1,
         $2,
         $3,
-        current_setting('encrypt.key_version')::integer,
+        pg_catalog.current_setting('encrypt.key_version')::integer,
         true
     );
 END;
@@ -315,21 +364,25 @@ $$;
 
 CREATE OR REPLACE FUNCTION load_key(text) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $_$
 DECLARE
     cipher_key ALIAS FOR $1;
     f_key_num integer;
     old_key_version text;
     v_key_version integer;
+    v_pgcrypto_schema text;
+    v_decrypted_key text;
+    v_wrapped_key bytea;
+    v_algorithm text;
 BEGIN
-    PERFORM pgstat_actv_mask();
-    old_key_version := current_setting('encrypt.key_version', true);
-    PERFORM enc_rm_key();
+    PERFORM @extschema@.pgstat_actv_mask();
+    old_key_version := pg_catalog.current_setting('encrypt.key_version', true);
+    PERFORM @extschema@.enc_rm_key();
 
     IF cipher_key IS NOT NULL THEN
         SELECT count(*) INTO f_key_num
-          FROM cipher_key_table
+          FROM @extschema@.cipher_key_table
          WHERE key_state = 'active';
 
         IF f_key_num = 0 THEN
@@ -338,27 +391,37 @@ BEGIN
             RAISE EXCEPTION 'EDB-ENC0045 more than one active key exists in cipher_key_table';
         END IF;
 
+        /* Look up pgcrypto schema dynamically */
+        v_pgcrypto_schema := @extschema@._pgcrypto_schema();
+        IF v_pgcrypto_schema IS NULL THEN
+            RAISE EXCEPTION 'pgcrypto extension is not installed';
+        END IF;
+
         BEGIN
-            SELECT key_version INTO v_key_version
-              FROM cipher_key_table
+            SELECT key_version, wrapped_key, algorithm
+              INTO v_key_version, v_wrapped_key, v_algorithm
+              FROM @extschema@.cipher_key_table
              WHERE key_state = 'active';
 
-            PERFORM set_config('encrypt.key_version', v_key_version::text, false);
+            PERFORM pg_catalog.set_config('encrypt.key_version', v_key_version::text, false);
 
-            PERFORM enc_store_key(pgp_sym_decrypt(wrapped_key, cipher_key), algorithm)
-              FROM cipher_key_table
-             WHERE key_state = 'active';
+            /* Use dynamic SQL for pgcrypto to prevent search_path hijacking */
+            EXECUTE pg_catalog.format('SELECT %I.pgp_sym_decrypt($1, $2)', v_pgcrypto_schema)
+               INTO v_decrypted_key
+              USING v_wrapped_key, cipher_key;
+
+            PERFORM @extschema@.enc_store_key(v_decrypted_key, v_algorithm);
 
             /* Update usage statistics */
-            UPDATE cipher_key_table
-               SET last_used_at = now(),
+            UPDATE @extschema@.cipher_key_table
+               SET last_used_at = pg_catalog.now(),
                    use_count = use_count + 1
              WHERE key_version = v_key_version;
         EXCEPTION
             WHEN OTHERS THEN
-                PERFORM enc_rm_key();
+                PERFORM @extschema@.enc_rm_key();
                 IF old_key_version IS NOT NULL THEN
-                    PERFORM set_config('encrypt.key_version', old_key_version, false);
+                    PERFORM pg_catalog.set_config('encrypt.key_version', old_key_version, false);
                 END IF;
                 RAISE EXCEPTION 'EDB-ENC0012 cipher key is not correct';
         END;
@@ -368,15 +431,19 @@ BEGIN
 END;
 $_$;
 
-DROP FUNCTION IF EXISTS public.load_key_by_version(text, integer);
+DROP FUNCTION IF EXISTS @extschema@.load_key_by_version(text, integer);
 CREATE FUNCTION load_key_by_version(text, integer) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 DECLARE
     master_passphrase ALIAS FOR $1;
     requested_version ALIAS FOR $2;
     old_key_version text;
+    v_pgcrypto_schema text;
+    v_decrypted_key text;
+    v_wrapped_key bytea;
+    v_algorithm text;
 BEGIN
     IF requested_version IS NULL OR requested_version <= 0 THEN
         RAISE EXCEPTION 'EDB-ENC0043 key version must be a positive integer';
@@ -384,42 +451,58 @@ BEGIN
 
     IF NOT EXISTS (
         SELECT 1
-          FROM cipher_key_table
+          FROM @extschema@.cipher_key_table
          WHERE key_version = requested_version
            AND key_state <> 'revoked'
     ) THEN
         RETURN FALSE;
     END IF;
 
-    old_key_version := current_setting('encrypt.key_version', true);
-    PERFORM pgstat_actv_mask();
+    old_key_version := pg_catalog.current_setting('encrypt.key_version', true);
+    PERFORM @extschema@.pgstat_actv_mask();
+
+    /* Look up pgcrypto schema dynamically */
+    v_pgcrypto_schema := @extschema@._pgcrypto_schema();
+    IF v_pgcrypto_schema IS NULL THEN
+        RAISE EXCEPTION 'pgcrypto extension is not installed';
+    END IF;
 
     BEGIN
-        PERFORM set_config('encrypt.key_version', requested_version::text, false);
-        PERFORM enc_store_key(pgp_sym_decrypt(wrapped_key, master_passphrase), algorithm)
-          FROM cipher_key_table
+        SELECT wrapped_key, algorithm
+          INTO v_wrapped_key, v_algorithm
+          FROM @extschema@.cipher_key_table
          WHERE key_version = requested_version
            AND key_state <> 'revoked';
+
         IF NOT FOUND THEN
             IF old_key_version IS NOT NULL THEN
-                PERFORM set_config('encrypt.key_version', old_key_version, false);
+                PERFORM pg_catalog.set_config('encrypt.key_version', old_key_version, false);
             END IF;
             RETURN FALSE;
         END IF;
 
+        PERFORM pg_catalog.set_config('encrypt.key_version', requested_version::text, false);
+
+        /* Use dynamic SQL for pgcrypto to prevent search_path hijacking */
+        EXECUTE pg_catalog.format('SELECT %I.pgp_sym_decrypt($1, $2)', v_pgcrypto_schema)
+           INTO v_decrypted_key
+          USING v_wrapped_key, master_passphrase;
+
+        PERFORM @extschema@.enc_store_key(v_decrypted_key, v_algorithm);
+
         /* Update usage statistics */
-        UPDATE cipher_key_table
-           SET last_used_at = now(),
+        UPDATE @extschema@.cipher_key_table
+           SET last_used_at = pg_catalog.now(),
                use_count = use_count + 1
          WHERE key_version = requested_version;
 
         IF old_key_version IS NOT NULL THEN
-            PERFORM set_config('encrypt.key_version', old_key_version, false);
+            PERFORM pg_catalog.set_config('encrypt.key_version', old_key_version, false);
         END IF;
     EXCEPTION
         WHEN OTHERS THEN
             IF old_key_version IS NOT NULL THEN
-                PERFORM set_config('encrypt.key_version', old_key_version, false);
+                PERFORM pg_catalog.set_config('encrypt.key_version', old_key_version, false);
             END IF;
             RAISE EXCEPTION 'EDB-ENC0012 cipher key is not correct';
     END;
@@ -430,17 +513,17 @@ $$;
 
 CREATE OR REPLACE FUNCTION rm_key_details() RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 BEGIN
-    RETURN enc_rm_key();
+    RETURN @extschema@.enc_rm_key();
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.activate_cipher_key(integer);
+DROP FUNCTION IF EXISTS @extschema@.activate_cipher_key(integer);
 CREATE FUNCTION activate_cipher_key(integer) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 DECLARE
     requested_version ALIAS FOR $1;
@@ -449,7 +532,7 @@ DECLARE
 BEGIN
     IF NOT EXISTS (
         SELECT 1
-          FROM cipher_key_table
+          FROM @extschema@.cipher_key_table
          WHERE key_version = requested_version
            AND key_state <> 'revoked'
     ) THEN
@@ -459,50 +542,50 @@ BEGIN
     /* Check if key is expired */
     IF EXISTS (
         SELECT 1
-          FROM cipher_key_table
+          FROM @extschema@.cipher_key_table
          WHERE key_version = requested_version
            AND expires_at IS NOT NULL
-           AND expires_at <= now()
+           AND expires_at <= pg_catalog.now()
     ) THEN
         RAISE EXCEPTION 'EDB-ENC0051 cannot activate expired key version %', requested_version;
     END IF;
 
-    old_key_version := current_setting('encrypt.key_version', true);
+    old_key_version := pg_catalog.current_setting('encrypt.key_version', true);
 
     /* Get current active version for audit log */
     SELECT key_version INTO old_active_version
-      FROM cipher_key_table
+      FROM @extschema@.cipher_key_table
      WHERE key_state = 'active';
 
     BEGIN
-        UPDATE cipher_key_table
+        UPDATE @extschema@.cipher_key_table
            SET key_state = CASE
                    WHEN key_version = requested_version THEN 'active'
                    WHEN key_state = 'active' THEN 'retired'
                    ELSE key_state
                END,
                state_changed_at = CASE
-                   WHEN key_version = requested_version OR key_state = 'active' THEN now()
+                   WHEN key_version = requested_version OR key_state = 'active' THEN pg_catalog.now()
                    ELSE state_changed_at
                END
          WHERE key_state <> 'revoked';
 
-        PERFORM set_config('encrypt.key_version', requested_version::text, false);
+        PERFORM pg_catalog.set_config('encrypt.key_version', requested_version::text, false);
     EXCEPTION
         WHEN OTHERS THEN
             IF old_key_version IS NOT NULL THEN
-                PERFORM set_config('encrypt.key_version', old_key_version, false);
+                PERFORM pg_catalog.set_config('encrypt.key_version', old_key_version, false);
             END IF;
             RAISE;
     END;
 
     /* Log the operation (non-fatal if logging fails) */
     BEGIN
-        INSERT INTO cipher_key_audit_log(operation, key_version, details)
+        INSERT INTO @extschema@.cipher_key_audit_log(operation, key_version, details)
         VALUES(
             'activate',
             requested_version,
-            jsonb_build_object('previous_active_version', old_active_version)
+            pg_catalog.jsonb_build_object('previous_active_version', old_active_version)
         );
     EXCEPTION
         WHEN OTHERS THEN
@@ -513,10 +596,10 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.revoke_cipher_key(integer);
+DROP FUNCTION IF EXISTS @extschema@.revoke_cipher_key(integer);
 CREATE FUNCTION revoke_cipher_key(integer) RETURNS boolean
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 DECLARE
     requested_version ALIAS FOR $1;
@@ -524,22 +607,22 @@ DECLARE
 BEGIN
     /* Get current state for audit log */
     SELECT key_state INTO old_state
-      FROM cipher_key_table
+      FROM @extschema@.cipher_key_table
      WHERE key_version = requested_version;
 
-    UPDATE cipher_key_table
+    UPDATE @extschema@.cipher_key_table
        SET key_state = 'revoked',
-           state_changed_at = now()
+           state_changed_at = pg_catalog.now()
      WHERE key_version = requested_version;
 
     IF FOUND THEN
         /* Log the operation (non-fatal if logging fails) */
         BEGIN
-            INSERT INTO cipher_key_audit_log(operation, key_version, details)
+            INSERT INTO @extschema@.cipher_key_audit_log(operation, key_version, details)
             VALUES(
                 'revoke',
                 requested_version,
-                jsonb_build_object('previous_state', old_state)
+                pg_catalog.jsonb_build_object('previous_state', old_state)
             );
         EXCEPTION
             WHEN OTHERS THEN
@@ -551,7 +634,7 @@ BEGIN
 END;
 $$;
 
-DROP FUNCTION IF EXISTS public.cipher_key_versions();
+DROP FUNCTION IF EXISTS @extschema@.cipher_key_versions();
 CREATE FUNCTION cipher_key_versions()
 RETURNS TABLE (
     key_version integer,
@@ -566,22 +649,22 @@ RETURNS TABLE (
     use_count bigint
 )
     LANGUAGE sql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
     SELECT c.key_version, c.algorithm, c.key_state, c.created_at, c.state_changed_at,
            c.expires_at,
-           (c.expires_at IS NOT NULL AND c.expires_at <= now()) AS is_expired,
+           (c.expires_at IS NOT NULL AND c.expires_at <= pg_catalog.now()) AS is_expired,
            c.description,
            c.last_used_at,
            c.use_count
-      FROM cipher_key_table AS c
+      FROM @extschema@.cipher_key_table AS c
      ORDER BY c.key_version;
 $$;
 
 /*
  * Function to check for and report expired keys
  */
-DROP FUNCTION IF EXISTS public.cipher_key_check_expired();
+DROP FUNCTION IF EXISTS @extschema@.cipher_key_check_expired();
 CREATE FUNCTION cipher_key_check_expired()
 RETURNS TABLE (
     key_version integer,
@@ -590,13 +673,13 @@ RETURNS TABLE (
     expired_since interval
 )
     LANGUAGE sql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
     SELECT c.key_version, c.key_state, c.expires_at,
-           (now() - c.expires_at) AS expired_since
-      FROM cipher_key_table AS c
+           (pg_catalog.now() - c.expires_at) AS expired_since
+      FROM @extschema@.cipher_key_table AS c
      WHERE c.expires_at IS NOT NULL
-       AND c.expires_at <= now()
+       AND c.expires_at <= pg_catalog.now()
        AND c.key_state NOT IN ('revoked')
      ORDER BY c.expires_at;
 $$;
@@ -604,7 +687,7 @@ $$;
 /*
  * Function to view audit log (for admins)
  */
-DROP FUNCTION IF EXISTS public.cipher_key_audit_log_view(integer, integer);
+DROP FUNCTION IF EXISTS @extschema@.cipher_key_audit_log_view(integer, integer);
 CREATE FUNCTION cipher_key_audit_log_view(
     p_limit integer DEFAULT 100,
     p_key_version integer DEFAULT NULL
@@ -618,32 +701,64 @@ RETURNS TABLE (
     details jsonb
 )
     LANGUAGE sql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
     SELECT l.id, l.operation, l.key_version, l.performed_by, l.performed_at, l.details
-      FROM cipher_key_audit_log AS l
+      FROM @extschema@.cipher_key_audit_log AS l
      WHERE (p_key_version IS NULL OR l.key_version = p_key_version)
      ORDER BY l.performed_at DESC
      LIMIT p_limit;
 $$;
 
-DROP FUNCTION IF EXISTS public.column_encrypt_blind_index_text(text, text);
+DROP FUNCTION IF EXISTS @extschema@.column_encrypt_blind_index_text(text, text);
 CREATE FUNCTION column_encrypt_blind_index_text(text, text) RETURNS text
-    LANGUAGE sql IMMUTABLE STRICT
+    LANGUAGE plpgsql STABLE STRICT
+    SET search_path TO pg_catalog
 AS $$
-    SELECT encode(hmac(convert_to($1, 'UTF8'), convert_to($2, 'UTF8'), 'sha256'), 'hex');
+DECLARE
+    v_pgcrypto_schema text;
+    v_result text;
+BEGIN
+    v_pgcrypto_schema := @extschema@._pgcrypto_schema();
+    IF v_pgcrypto_schema IS NULL THEN
+        RAISE EXCEPTION 'pgcrypto extension is not installed';
+    END IF;
+
+    EXECUTE pg_catalog.format(
+        'SELECT pg_catalog.encode(%I.hmac(pg_catalog.convert_to($1, ''UTF8''), pg_catalog.convert_to($2, ''UTF8''), ''sha256''), ''hex'')',
+        v_pgcrypto_schema
+    ) INTO v_result USING $1, $2;
+
+    RETURN v_result;
+END;
 $$;
 
-DROP FUNCTION IF EXISTS public.column_encrypt_blind_index_bytea(bytea, text);
+DROP FUNCTION IF EXISTS @extschema@.column_encrypt_blind_index_bytea(bytea, text);
 CREATE FUNCTION column_encrypt_blind_index_bytea(bytea, text) RETURNS text
-    LANGUAGE sql IMMUTABLE STRICT
+    LANGUAGE plpgsql STABLE STRICT
+    SET search_path TO pg_catalog
 AS $$
-    SELECT encode(hmac($1, convert_to($2, 'UTF8'), 'sha256'), 'hex');
+DECLARE
+    v_pgcrypto_schema text;
+    v_result text;
+BEGIN
+    v_pgcrypto_schema := @extschema@._pgcrypto_schema();
+    IF v_pgcrypto_schema IS NULL THEN
+        RAISE EXCEPTION 'pgcrypto extension is not installed';
+    END IF;
+
+    EXECUTE pg_catalog.format(
+        'SELECT pg_catalog.encode(%I.hmac($1, pg_catalog.convert_to($2, ''UTF8''), ''sha256''), ''hex'')',
+        v_pgcrypto_schema
+    ) INTO v_result USING $1, $2;
+
+    RETURN v_result;
+END;
 $$;
 
 CREATE OR REPLACE FUNCTION cipher_key_reencrypt_data(text, text, text) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $_$
 DECLARE
     p_schema    ALIAS FOR $1;
@@ -652,11 +767,12 @@ DECLARE
     v_sql       text;
     v_count     bigint;
     v_col_type  text;
+    v_col_type_qualified text;
 BEGIN
-    PERFORM pgstat_actv_mask();
+    PERFORM @extschema@.pgstat_actv_mask();
 
     /* Encryption must be enabled for re-encryption to work */
-    IF current_setting('encrypt.enable') <> 'on' THEN
+    IF pg_catalog.current_setting('encrypt.enable') <> 'on' THEN
         RAISE EXCEPTION 'EDB-ENC0048 encrypt.enable must be on for data re-encryption';
     END IF;
 
@@ -666,11 +782,14 @@ BEGIN
         RAISE EXCEPTION 'EDB-ENC0041 invalid schema/table/column name';
     END IF;
 
-    SELECT format_type(a.atttypid, a.atttypmod)
-      INTO v_col_type
-      FROM pg_attribute a
-      JOIN pg_class c ON c.oid = a.attrelid
-      JOIN pg_namespace n ON n.oid = c.relnamespace
+    /* Get both typname (for comparison) and safely-quoted schema-qualified name (for dynamic SQL) */
+    SELECT t.typname, pg_catalog.format('%I.%I', tn.nspname, t.typname)
+      INTO v_col_type, v_col_type_qualified
+      FROM pg_catalog.pg_attribute a
+      JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+      JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
      WHERE n.nspname = p_schema
        AND c.relname = p_table
        AND a.attname = p_column
@@ -685,9 +804,9 @@ BEGIN
         RAISE EXCEPTION 'EDB-ENC0046 %.%.% is not an encrypted column', p_schema, p_table, p_column;
     END IF;
 
-    v_sql := format(
+    v_sql := pg_catalog.format(
         'UPDATE %I.%I SET %I = %I::text::%s',
-        p_schema, p_table, p_column, p_column, v_col_type
+        p_schema, p_table, p_column, p_column, v_col_type_qualified
     );
 
     EXECUTE v_sql;
@@ -697,10 +816,10 @@ BEGIN
 END;
 $_$;
 
-DROP FUNCTION IF EXISTS public.cipher_key_reencrypt_data_batch(text, text, text, integer);
+DROP FUNCTION IF EXISTS @extschema@.cipher_key_reencrypt_data_batch(text, text, text, integer);
 CREATE FUNCTION cipher_key_reencrypt_data_batch(text, text, text, integer) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $_$
 DECLARE
     p_schema     ALIAS FOR $1;
@@ -710,20 +829,24 @@ DECLARE
     v_sql        text;
     v_count      bigint;
     v_col_type   text;
+    v_col_type_qualified text;
 BEGIN
     IF p_batch_size IS NULL OR p_batch_size <= 0 THEN
         RAISE EXCEPTION 'EDB-ENC0047 batch size must be a positive integer';
     END IF;
 
-    IF current_setting('encrypt.enable') <> 'on' THEN
+    IF pg_catalog.current_setting('encrypt.enable') <> 'on' THEN
         RAISE EXCEPTION 'EDB-ENC0048 encrypt.enable must be on for data re-encryption';
     END IF;
 
-    SELECT format_type(a.atttypid, a.atttypmod)
-      INTO v_col_type
-      FROM pg_attribute a
-      JOIN pg_class c ON c.oid = a.attrelid
-      JOIN pg_namespace n ON n.oid = c.relnamespace
+    /* Get both typname (for comparison) and safely-quoted schema-qualified name (for dynamic SQL) */
+    SELECT t.typname, pg_catalog.format('%I.%I', tn.nspname, t.typname)
+      INTO v_col_type, v_col_type_qualified
+      FROM pg_catalog.pg_attribute a
+      JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+      JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
      WHERE n.nspname = p_schema
        AND c.relname = p_table
        AND a.attname = p_column
@@ -738,11 +861,11 @@ BEGIN
         RAISE EXCEPTION 'EDB-ENC0046 %.%.% is not an encrypted column', p_schema, p_table, p_column;
     END IF;
 
-    v_sql := format(
+    v_sql := pg_catalog.format(
         'WITH batch AS (
             SELECT ctid
               FROM %I.%I
-             WHERE enc_key_version(%I) <> current_setting(''encrypt.key_version'')::integer
+             WHERE @extschema@.enc_key_version(%I) <> pg_catalog.current_setting(''encrypt.key_version'')::integer
              LIMIT %s
          )
          UPDATE %I.%I AS t
@@ -750,7 +873,7 @@ BEGIN
            FROM batch
           WHERE t.ctid = batch.ctid',
         p_schema, p_table, p_column, p_batch_size,
-        p_schema, p_table, p_column, p_column, v_col_type
+        p_schema, p_table, p_column, p_column, v_col_type_qualified
     );
 
     EXECUTE v_sql;
@@ -760,17 +883,17 @@ BEGIN
 END;
 $_$;
 
-DROP FUNCTION IF EXISTS public.cipher_key_reencrypt_data(text, text, text, integer);
+DROP FUNCTION IF EXISTS @extschema@.cipher_key_reencrypt_data(text, text, text, integer);
 CREATE FUNCTION cipher_key_reencrypt_data(text, text, text, integer) RETURNS bigint
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 DECLARE
     total_rows bigint := 0;
     processed_rows bigint;
 BEGIN
     LOOP
-        processed_rows := cipher_key_reencrypt_data_batch($1, $2, $3, $4);
+        processed_rows := @extschema@.cipher_key_reencrypt_data_batch($1, $2, $3, $4);
         EXIT WHEN processed_rows = 0;
         total_rows := total_rows + processed_rows;
     END LOOP;
@@ -782,7 +905,7 @@ $$;
 /*
  * Function to verify that encrypted data in a column can be decrypted
  */
-DROP FUNCTION IF EXISTS public.cipher_verify_column_encryption(text, text, text, integer);
+DROP FUNCTION IF EXISTS @extschema@.cipher_verify_column_encryption(text, text, text, integer);
 CREATE FUNCTION cipher_verify_column_encryption(text, text, text, integer DEFAULT 1000)
 RETURNS TABLE (
     check_name text,
@@ -795,7 +918,7 @@ RETURNS TABLE (
     details text
 )
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $_$
 DECLARE
     p_schema     ALIAS FOR $1;
@@ -824,11 +947,12 @@ BEGIN
     END IF;
 
     /* Check column type */
-    SELECT format_type(a.atttypid, a.atttypmod)
+    SELECT t.typname
       INTO v_col_type
-      FROM pg_attribute a
-      JOIN pg_class c ON c.oid = a.attrelid
-      JOIN pg_namespace n ON n.oid = c.relnamespace
+      FROM pg_catalog.pg_attribute a
+      JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
      WHERE n.nspname = p_schema
        AND c.relname = p_table
        AND a.attname = p_column
@@ -838,7 +962,7 @@ BEGIN
     IF v_col_type IS NULL THEN
         check_name := 'column_exists';
         status := 'error';
-        details := format('column %I.%I.%I not found', p_schema, p_table, p_column);
+        details := pg_catalog.format('column %I.%I.%I not found', p_schema, p_table, p_column);
         RETURN NEXT;
         RETURN;
     END IF;
@@ -846,19 +970,19 @@ BEGIN
     IF v_col_type NOT IN ('encrypted_text', 'encrypted_bytea') THEN
         check_name := 'column_type';
         status := 'error';
-        details := format('column %I.%I.%I is type %s, not encrypted', p_schema, p_table, p_column, v_col_type);
+        details := pg_catalog.format('column %I.%I.%I is type %s, not encrypted', p_schema, p_table, p_column, v_col_type);
         RETURN NEXT;
         RETURN;
     END IF;
 
     /* Get total row count */
-    EXECUTE format('SELECT count(*) FROM %I.%I WHERE %I IS NOT NULL', p_schema, p_table, p_column)
+    EXECUTE pg_catalog.format('SELECT count(*) FROM %I.%I WHERE %I IS NOT NULL', p_schema, p_table, p_column)
        INTO v_total;
 
     /* Get loaded key versions */
-    v_loaded := loaded_cipher_key_versions();
+    v_loaded := @extschema@.loaded_cipher_key_versions();
 
-    IF v_loaded IS NULL OR array_length(v_loaded, 1) IS NULL THEN
+    IF v_loaded IS NULL OR pg_catalog.array_length(v_loaded, 1) IS NULL THEN
         check_name := 'keys_loaded';
         status := 'error';
         total_rows := v_total;
@@ -868,8 +992,8 @@ BEGIN
     END IF;
 
     /* Get distinct key versions used in the column */
-    EXECUTE format(
-        'SELECT array_agg(DISTINCT enc_key_version(%I)) FROM %I.%I WHERE %I IS NOT NULL',
+    EXECUTE pg_catalog.format(
+        'SELECT pg_catalog.array_agg(DISTINCT @extschema@.enc_key_version(%I)) FROM %I.%I WHERE %I IS NOT NULL',
         p_column, p_schema, p_table, p_column
     ) INTO v_versions;
 
@@ -880,7 +1004,7 @@ BEGIN
 
     /* Count successful decryptions by casting to text (which triggers decryption) */
     BEGIN
-        EXECUTE format(
+        EXECUTE pg_catalog.format(
             'SELECT count(*) FROM (
                 SELECT %I::text
                   FROM %I.%I
@@ -896,13 +1020,13 @@ BEGIN
             /* Bulk decryption failed; try row-by-row to get accurate counts */
             v_success := 0;
             v_failed := 0;
-            FOR rec IN EXECUTE format(
+            FOR rec IN EXECUTE pg_catalog.format(
                 'SELECT ctid FROM %I.%I WHERE %I IS NOT NULL LIMIT %s',
                 p_schema, p_table, p_column, p_sample_size
             ) LOOP
                 v_sampled := v_sampled + 1;
                 BEGIN
-                    EXECUTE format(
+                    EXECUTE pg_catalog.format(
                         'SELECT %I::text FROM %I.%I WHERE ctid = $1',
                         p_column, p_schema, p_table
                     ) USING rec.ctid;
@@ -923,10 +1047,10 @@ BEGIN
 
     IF v_failed = 0 THEN
         status := 'ok';
-        details := format('all %s sampled rows decrypted successfully', v_sampled);
+        details := pg_catalog.format('all %s sampled rows decrypted successfully', v_sampled);
     ELSE
         status := 'error';
-        details := format('%s of %s sampled rows failed to decrypt; check if required key versions %s are loaded (currently loaded: %s)',
+        details := pg_catalog.format('%s of %s sampled rows failed to decrypt; check if required key versions %s are loaded (currently loaded: %s)',
                           v_failed, v_sampled, v_versions, v_loaded);
     END IF;
 
@@ -935,7 +1059,7 @@ BEGIN
 END;
 $_$;
 
-DROP FUNCTION IF EXISTS public.cipher_key_logical_replication_check(text, text);
+DROP FUNCTION IF EXISTS @extschema@.cipher_key_logical_replication_check(text, text);
 CREATE FUNCTION cipher_key_logical_replication_check(text, text)
 RETURNS TABLE (
     severity text,
@@ -944,7 +1068,7 @@ RETURNS TABLE (
     details text
 )
     LANGUAGE plpgsql SECURITY DEFINER
-    SET search_path TO public
+    SET search_path TO pg_catalog
 AS $$
 DECLARE
     p_schema ALIAS FOR $1;
@@ -955,17 +1079,17 @@ DECLARE
 BEGIN
     RETURN QUERY
     SELECT
-        CASE WHEN current_setting('wal_level') = 'logical' THEN 'info' ELSE 'warning' END,
-        'wal_level',
-        CASE WHEN current_setting('wal_level') = 'logical' THEN 'ok' ELSE 'check' END,
-        format('wal_level is %s', current_setting('wal_level'));
+        CASE WHEN pg_catalog.current_setting('wal_level') = 'logical' THEN 'info'::text ELSE 'warning'::text END,
+        'wal_level'::text,
+        CASE WHEN pg_catalog.current_setting('wal_level') = 'logical' THEN 'ok'::text ELSE 'check'::text END,
+        pg_catalog.format('wal_level is %s', pg_catalog.current_setting('wal_level'))::text;
 
     SELECT count(*)
       INTO encrypted_column_count
-      FROM pg_attribute a
-      JOIN pg_class c ON c.oid = a.attrelid
-      JOIN pg_namespace n ON n.oid = c.relnamespace
-      JOIN pg_type t ON t.oid = a.atttypid
+      FROM pg_catalog.pg_attribute a
+      JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
      WHERE n.nspname = p_schema
        AND c.relname = p_table
        AND a.attnum > 0
@@ -974,19 +1098,19 @@ BEGIN
 
     RETURN QUERY
     SELECT
-        CASE WHEN encrypted_column_count > 0 THEN 'info' ELSE 'warning' END,
-        'encrypted_columns',
-        CASE WHEN encrypted_column_count > 0 THEN 'ok' ELSE 'check' END,
-        format('table %I.%I has %s encrypted columns', p_schema, p_table, encrypted_column_count);
+        CASE WHEN encrypted_column_count > 0 THEN 'info'::text ELSE 'warning'::text END,
+        'encrypted_columns'::text,
+        CASE WHEN encrypted_column_count > 0 THEN 'ok'::text ELSE 'check'::text END,
+        pg_catalog.format('table %I.%I has %s encrypted columns', p_schema, p_table, encrypted_column_count)::text;
 
     SELECT EXISTS (
         SELECT 1
-          FROM pg_index i
-          JOIN pg_class c ON c.oid = i.indrelid
-          JOIN pg_namespace n ON n.oid = c.relnamespace
-          JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
-          JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
-          JOIN pg_type t ON t.oid = a.atttypid
+          FROM pg_catalog.pg_index i
+          JOIN pg_catalog.pg_class c ON c.oid = i.indrelid
+          JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+          JOIN pg_catalog.unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+          JOIN pg_catalog.pg_attribute a ON a.attrelid = c.oid AND a.attnum = k.attnum
+          JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
          WHERE n.nspname = p_schema
            AND c.relname = p_table
            AND i.indisreplident
@@ -995,36 +1119,36 @@ BEGIN
 
     SELECT c.relreplident = 'f'
       INTO replica_identity_full
-      FROM pg_class c
-      JOIN pg_namespace n ON n.oid = c.relnamespace
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
      WHERE n.nspname = p_schema
        AND c.relname = p_table;
 
     RETURN QUERY
     SELECT
         CASE
-            WHEN replica_identity_full AND encrypted_column_count > 0 THEN 'warning'
-            WHEN replica_identity_uses_encrypted THEN 'warning'
-            ELSE 'info'
+            WHEN replica_identity_full AND encrypted_column_count > 0 THEN 'warning'::text
+            WHEN replica_identity_uses_encrypted THEN 'warning'::text
+            ELSE 'info'::text
         END,
-        'replica_identity',
+        'replica_identity'::text,
         CASE
-            WHEN replica_identity_full AND encrypted_column_count > 0 THEN 'check'
-            WHEN replica_identity_uses_encrypted THEN 'check'
-            ELSE 'ok'
+            WHEN replica_identity_full AND encrypted_column_count > 0 THEN 'check'::text
+            WHEN replica_identity_uses_encrypted THEN 'check'::text
+            ELSE 'ok'::text
         END,
         CASE
-            WHEN replica_identity_full AND encrypted_column_count > 0 THEN 'replica identity is FULL and encrypted columns will participate in subscriber row matching; confirm ciphertext replication semantics and key availability'
-            WHEN replica_identity_uses_encrypted THEN 'replica identity includes encrypted columns; confirm subscriber semantics and key availability'
-            ELSE 'replica identity does not include encrypted columns'
+            WHEN replica_identity_full AND encrypted_column_count > 0 THEN 'replica identity is FULL and encrypted columns will participate in subscriber row matching; confirm ciphertext replication semantics and key availability'::text
+            WHEN replica_identity_uses_encrypted THEN 'replica identity includes encrypted columns; confirm subscriber semantics and key availability'::text
+            ELSE 'replica identity does not include encrypted columns'::text
         END;
 
     RETURN QUERY
     SELECT
-        'warning',
-        'subscriber_prereqs',
-        'manual',
-        'logical subscribers must have the column_encrypt extension installed and must load the correct keys independently; keys are not replicated';
+        'warning'::text,
+        'subscriber_prereqs'::text,
+        'manual'::text,
+        'logical subscribers must have the column_encrypt extension installed and must load the correct keys independently; keys are not replicated'::text;
 END;
 $$;
 

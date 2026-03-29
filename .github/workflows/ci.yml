@@ -102,6 +102,12 @@ jobs:
           createdb test_column_encrypt_upgrade
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
             -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          # Pre-create encrypt schema: required because control file has
+          # schema = encrypt with relocatable = false. PostgreSQL does NOT
+          # auto-create the schema. The extension's v3.3.sql uses conditional
+          # logic to handle the case where schema already exists externally.
+          psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
+            -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
             -c "CREATE EXTENSION column_encrypt VERSION '2.0';"
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade \
@@ -121,13 +127,212 @@ jobs:
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
             -c "SELECT extversion FROM pg_extension WHERE extname = 'column_encrypt';" | grep -Fx '3.0'
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
-            -c "SELECT has_function_privilege('upgrade_admin', 'register_cipher_key(text,text,text)', 'EXECUTE');" | grep -Fx 't'
+            -c "SELECT has_function_privilege('upgrade_admin', 'encrypt.register_cipher_key(text,text,text)', 'EXECUTE');" | grep -Fx 't'
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
-            -c "SELECT has_function_privilege('upgrade_runtime', 'load_key(text)', 'EXECUTE');" | grep -Fx 't'
+            -c "SELECT has_function_privilege('upgrade_runtime', 'encrypt.load_key(text)', 'EXECUTE');" | grep -Fx 't'
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
-            -c "SELECT has_function_privilege('upgrade_runtime', 'loaded_cipher_key_versions()', 'EXECUTE');" | grep -Fx 't'
+            -c "SELECT has_function_privilege('upgrade_runtime', 'encrypt.loaded_cipher_key_versions()', 'EXECUTE');" | grep -Fx 't'
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
-            -c "SELECT has_function_privilege('upgrade_reader', 'cipher_key_versions()', 'EXECUTE');" | grep -Fx 't'
+            -c "SELECT has_function_privilege('upgrade_reader', 'encrypt.cipher_key_versions()', 'EXECUTE');" | grep -Fx 't'
           psql -h /tmp -p $PGPORT -d test_column_encrypt_upgrade -At \
-            -c "SELECT has_function_privilege('public', 'load_key(text)', 'EXECUTE');" | grep -Fx 'f'
+            -c "SELECT has_function_privilege('public', 'encrypt.load_key(text)', 'EXECUTE');" | grep -Fx 'f'
+          pg_ctl -D "$PGDATA" stop
+
+      - name: Verify 3.1 to 3.3 upgrade path (deprecation release)
+        if: matrix.pg_version == 14 || matrix.pg_version == 18
+        run: |
+          export PGDATA=$(mktemp -d)
+          export PGPORT=54323
+          export PGHOST=/tmp
+          initdb --no-locale -E UTF8 "$PGDATA"
+          echo "shared_preload_libraries = 'column_encrypt'" >> "$PGDATA/postgresql.conf"
+          echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
+          echo "port = $PGPORT" >> "$PGDATA/postgresql.conf"
+          pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -w start || \
+            (cat "$PGDATA/postgres.log" && exit 1)
+          createdb test_upgrade_33
+          psql -h /tmp -p $PGPORT -d test_upgrade_33 \
+            -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          # Pre-create encrypt schema for extension (schema = encrypt in control file)
+          psql -h /tmp -p $PGPORT -d test_upgrade_33 \
+            -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
+          # Install v3.1
+          psql -h /tmp -p $PGPORT -d test_upgrade_33 \
+            -c "CREATE EXTENSION column_encrypt VERSION '3.1';"
+          # Upgrade to v3.3 (deprecation release with encrypt schema)
+          psql -h /tmp -p $PGPORT -d test_upgrade_33 \
+            -c "ALTER EXTENSION column_encrypt UPDATE TO '3.3';"
+          psql -h /tmp -p $PGPORT -d test_upgrade_33 -At \
+            -c "SELECT extversion FROM pg_extension WHERE extname = 'column_encrypt';" | grep -Fx '3.3'
+          # Verify encrypt schema exists
+          psql -h /tmp -p $PGPORT -d test_upgrade_33 -At \
+            -c "SELECT nspname FROM pg_namespace WHERE nspname = 'encrypt';" | grep -Fx 'encrypt'
+          # Verify new API functions exist
+          psql -h /tmp -p $PGPORT -d test_upgrade_33 -At \
+            -c "SELECT proname FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = 'register_key';" | grep -Fx 'register_key'
+          psql -h /tmp -p $PGPORT -d test_upgrade_33 -At \
+            -c "SELECT proname FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = 'load_key';" | grep -Fx 'load_key'
+          psql -h /tmp -p $PGPORT -d test_upgrade_33 -At \
+            -c "SELECT proname FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = 'rotate';" | grep -Fx 'rotate'
+          # Verify column_encrypt_user role exists
+          psql -h /tmp -p $PGPORT -d test_upgrade_33 -At \
+            -c "SELECT rolname FROM pg_roles WHERE rolname = 'column_encrypt_user';" | grep -Fx 'column_encrypt_user'
+          # Old API still works in v3.3
+          psql -h /tmp -p $PGPORT -d test_upgrade_33 -At \
+            -c "SELECT proname FROM pg_proc WHERE proname = 'register_cipher_key' LIMIT 1;" | grep -Fx 'register_cipher_key'
+          pg_ctl -D "$PGDATA" stop
+
+      - name: Verify 3.3 to 4.0 upgrade path (clean release)
+        if: matrix.pg_version == 14 || matrix.pg_version == 18
+        run: |
+          export PGDATA=$(mktemp -d)
+          export PGPORT=54324
+          export PGHOST=/tmp
+          initdb --no-locale -E UTF8 "$PGDATA"
+          echo "shared_preload_libraries = 'column_encrypt'" >> "$PGDATA/postgresql.conf"
+          echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
+          echo "port = $PGPORT" >> "$PGDATA/postgresql.conf"
+          pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -w start || \
+            (cat "$PGDATA/postgres.log" && exit 1)
+          createdb test_upgrade_40
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 \
+            -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          # Pre-create encrypt schema for extension (schema = encrypt in control file)
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 \
+            -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
+          # Install v3.3 first
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 \
+            -c "CREATE EXTENSION column_encrypt VERSION '3.3';"
+          # Upgrade to v4.0
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 \
+            -c "ALTER EXTENSION column_encrypt UPDATE TO '4.0';"
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 -At \
+            -c "SELECT extversion FROM pg_extension WHERE extname = 'column_encrypt';" | grep -Fx '4.0'
+          # Verify deprecated functions are GONE
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 -At \
+            -c "SELECT COUNT(*) FROM pg_proc WHERE proname = 'cipher_key_disable_log';" | grep -Fx '0'
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 -At \
+            -c "SELECT COUNT(*) FROM pg_proc WHERE proname = 'register_cipher_key';" | grep -Fx '0'
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 -At \
+            -c "SELECT COUNT(*) FROM pg_proc WHERE proname = 'cipher_metrics';" | grep -Fx '0'
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 -At \
+            -c "SELECT COUNT(*) FROM pg_proc WHERE proname = 'cipher_coverage_audit';" | grep -Fx '0'
+          # Verify encrypt schema API still works
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 -At \
+            -c "SELECT proname FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = 'register_key';" | grep -Fx 'register_key'
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 -At \
+            -c "SELECT proname FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = 'load_key';" | grep -Fx 'load_key'
+          psql -h /tmp -p $PGPORT -d test_upgrade_40 -At \
+            -c "SELECT proname FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = 'status';" | grep -Fx 'status'
+          pg_ctl -D "$PGDATA" stop
+
+      - name: Test v4.0 fresh install
+        if: matrix.pg_version == 18
+        run: |
+          export PGDATA=$(mktemp -d)
+          export PGPORT=54325
+          export PGHOST=/tmp
+          initdb --no-locale -E UTF8 "$PGDATA"
+          echo "shared_preload_libraries = 'column_encrypt'" >> "$PGDATA/postgresql.conf"
+          echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
+          echo "port = $PGPORT" >> "$PGDATA/postgresql.conf"
+          pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -w start || \
+            (cat "$PGDATA/postgres.log" && exit 1)
+          createdb test_v40_fresh
+          psql -h /tmp -p $PGPORT -d test_v40_fresh \
+            -c "CREATE EXTENSION IF NOT EXISTS pgcrypto;"
+          # Pre-create encrypt schema for extension (schema = encrypt in control file)
+          psql -h /tmp -p $PGPORT -d test_v40_fresh \
+            -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
+          # Fresh install of v4.0
+          psql -h /tmp -p $PGPORT -d test_v40_fresh \
+            -c "CREATE EXTENSION column_encrypt VERSION '4.0';"
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -At \
+            -c "SELECT extversion FROM pg_extension WHERE extname = 'column_encrypt';" | grep -Fx '4.0'
+          # Set database search_path to include encrypt schema for type resolution
+          # Extension types (encrypted_text, encrypted_bytea) live in encrypt schema
+          psql -h /tmp -p $PGPORT -d test_v40_fresh \
+            -c "ALTER DATABASE test_v40_fresh SET search_path TO public, encrypt, pg_catalog;"
+          # Verify clean API (no deprecated functions)
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -At \
+            -c "SELECT COUNT(*) FROM pg_proc WHERE proname = 'cipher_key_disable_log';" | grep -Fx '0'
+          # Setup test_user with column_encrypt_user role
+          psql -h /tmp -p $PGPORT -d test_v40_fresh \
+            -c "CREATE ROLE test_user LOGIN; GRANT column_encrypt_user TO test_user; GRANT CREATE ON SCHEMA public TO test_user;"
+          # Test full workflow as test_user (non-superuser with granted role)
+          # Register key and verify return value
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -U test_user -At \
+            -c "SELECT encrypt.register_key('my-32-byte-test-encryption-key!!', 'test-pass');" | grep -Fx '1'
+          # Create table as test_user
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -U test_user \
+            -c "CREATE TABLE secrets (id serial, data encrypted_text);"
+          # Load key, insert, select in same session as test_user (keys are session-scoped)
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -U test_user -At \
+            -c "SELECT encrypt.load_key('test-pass'); INSERT INTO secrets(data) VALUES ('secret-value'); SELECT data FROM secrets;" | grep -Fx 'secret-value'
+          # Test status function as test_user
+          psql -h /tmp -p $PGPORT -d test_v40_fresh -U test_user -At \
+            -c "SELECT encrypt.load_key('test-pass'); SELECT key_loaded FROM encrypt.status();" | grep -Fx 't'
+          pg_ctl -D "$PGDATA" stop
+
+      - name: Verify upgrade vs fresh install function parity
+        if: matrix.pg_version == 18
+        run: |
+          export PGDATA=$(mktemp -d)
+          export PGPORT=54326
+          export PGHOST=/tmp
+          initdb --no-locale -E UTF8 "$PGDATA"
+          echo "shared_preload_libraries = 'column_encrypt'" >> "$PGDATA/postgresql.conf"
+          echo "unix_socket_directories = '/tmp'" >> "$PGDATA/postgresql.conf"
+          echo "port = $PGPORT" >> "$PGDATA/postgresql.conf"
+          pg_ctl -D "$PGDATA" -l "$PGDATA/postgres.log" -w start || \
+            (cat "$PGDATA/postgres.log" && exit 1)
+
+          # Create two databases: one upgraded, one fresh
+          createdb db_upgraded
+          createdb db_fresh
+
+          # Setup upgraded database (3.3 -> 4.0)
+          psql -h /tmp -p $PGPORT -d db_upgraded -c "CREATE EXTENSION pgcrypto;"
+          psql -h /tmp -p $PGPORT -d db_upgraded -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
+          psql -h /tmp -p $PGPORT -d db_upgraded -c "CREATE EXTENSION column_encrypt VERSION '3.3';"
+          psql -h /tmp -p $PGPORT -d db_upgraded -c "ALTER EXTENSION column_encrypt UPDATE TO '4.0';"
+
+          # Setup fresh database (direct 4.0)
+          psql -h /tmp -p $PGPORT -d db_fresh -c "CREATE EXTENSION pgcrypto;"
+          psql -h /tmp -p $PGPORT -d db_fresh -c "CREATE SCHEMA IF NOT EXISTS encrypt;"
+          psql -h /tmp -p $PGPORT -d db_fresh -c "CREATE EXTENSION column_encrypt VERSION '4.0';"
+
+          # Compare function bodies for all encrypt.* functions
+          # Extract prosrc (function source) for each function and compare
+          echo "Comparing encrypt.* function bodies between upgraded and fresh install..."
+
+          FUNCTIONS="register_key load_key unload_key activate_key revoke_key rotate verify keys status blind_index"
+          for func in $FUNCTIONS; do
+            echo "Checking encrypt.$func..."
+
+            UPGRADED=$(psql -h /tmp -p $PGPORT -d db_upgraded -At -c \
+              "SELECT md5(prosrc) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = '$func';")
+
+            FRESH=$(psql -h /tmp -p $PGPORT -d db_fresh -At -c \
+              "SELECT md5(prosrc) FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = '$func';")
+
+            if [ "$UPGRADED" != "$FRESH" ]; then
+              echo "MISMATCH: encrypt.$func function body differs!"
+              echo "Upgraded MD5: $UPGRADED"
+              echo "Fresh MD5: $FRESH"
+              echo ""
+              echo "Upgraded source:"
+              psql -h /tmp -p $PGPORT -d db_upgraded -At -c \
+                "SELECT prosrc FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = '$func';"
+              echo ""
+              echo "Fresh source:"
+              psql -h /tmp -p $PGPORT -d db_fresh -At -c \
+                "SELECT prosrc FROM pg_proc p JOIN pg_namespace n ON p.pronamespace = n.oid WHERE n.nspname = 'encrypt' AND p.proname = '$func';"
+              pg_ctl -D "$PGDATA" stop
+              exit 1
+            fi
+            echo "  OK: encrypt.$func matches"
+          done
+
+          echo "All encrypt.* function bodies match between upgraded and fresh install!"
           pg_ctl -D "$PGDATA" stop

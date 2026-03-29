@@ -1,0 +1,875 @@
+/* column_encrypt--3.1--3.3.sql */
+
+-- Upgrade script: API Simplification and Deprecation
+--
+-- This release introduces the 'encrypt' schema with a simplified API.
+-- Old functions remain available but emit deprecation notices.
+--
+-- Changes:
+-- 1. New 'encrypt' schema with cleaner function names
+-- 2. Automatic log masking (no more disable_log/enable_log ceremony)
+-- 3. Single 'column_encrypt_user' role (simplifies 3-role system)
+-- 4. Deprecated: rate limiting, coverage audit, rotation jobs, audit logging
+--
+-- Migration: Use encrypt.* functions going forward
+
+\echo Use "ALTER EXTENSION column_encrypt UPDATE TO '3.3'" to load this file. \quit
+
+/*
+ * =============================================================================
+ * CREATE ENCRYPT SCHEMA
+ * =============================================================================
+ */
+
+/*
+ * _pgcrypto_schema - Get the schema where pgcrypto is installed
+ *
+ * This helper function dynamically looks up the pgcrypto extension's schema
+ * to avoid hardcoding assumptions. Used by SECURITY DEFINER functions to
+ * safely call pgcrypto functions regardless of where the extension is installed.
+ * Created in @extschema@ for consistent relocatability patterns.
+ */
+CREATE FUNCTION _pgcrypto_schema() RETURNS TEXT
+    LANGUAGE sql STABLE
+    SET search_path TO pg_catalog
+AS $$
+    SELECT n.nspname::text
+      FROM pg_extension e
+      JOIN pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'pgcrypto';
+$$;
+
+COMMENT ON FUNCTION _pgcrypto_schema() IS
+    'Returns the schema where pgcrypto extension is installed.';
+
+-- Internal function, not for direct use
+REVOKE EXECUTE ON FUNCTION _pgcrypto_schema() FROM PUBLIC;
+
+/*
+ * =============================================================================
+ * SIMPLIFIED KEY MANAGEMENT API
+ * =============================================================================
+ */
+
+/*
+ * register_key - Register a new data encryption key
+ *
+ * This is the simplified replacement for register_cipher_key().
+ * Log masking is handled automatically.
+ *
+ * Parameters:
+ *   dek        - The data encryption key (min 16 bytes, recommend 32)
+ *   passphrase - Master passphrase to wrap the DEK (never stored)
+ *   activate   - If true (default), make this the active key
+ *
+ * Returns: The assigned key ID (auto-incremented)
+ */
+CREATE FUNCTION register_key(
+    dek TEXT,
+    passphrase TEXT,
+    activate BOOLEAN DEFAULT true
+) RETURNS INTEGER
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO pg_catalog
+AS $$
+DECLARE
+    v_key_id INTEGER;
+    v_pgcrypto_schema TEXT;
+    v_wrapped_key BYTEA;
+BEGIN
+    -- Automatic log masking
+    PERFORM @extschema@.pgstat_actv_mask();
+    SET LOCAL track_activities = off;
+
+    -- Input validation
+    IF dek IS NULL OR dek = '' THEN
+        RAISE EXCEPTION 'encryption key cannot be null or empty'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    IF octet_length(dek) < 16 THEN
+        RAISE EXCEPTION 'encryption key must be at least 16 bytes'
+            USING ERRCODE = 'invalid_parameter_value',
+            HINT = 'Use a 32-byte key for AES-256 security';
+    END IF;
+
+    IF passphrase IS NULL OR passphrase = '' THEN
+        RAISE EXCEPTION 'passphrase cannot be null or empty'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- Look up pgcrypto schema dynamically to avoid hardcoding
+    v_pgcrypto_schema := @extschema@._pgcrypto_schema();
+    IF v_pgcrypto_schema IS NULL THEN
+        RAISE EXCEPTION 'pgcrypto extension is not installed'
+            USING ERRCODE = 'feature_not_supported';
+    END IF;
+
+    -- Lock first to prevent concurrent registration race
+    LOCK TABLE @extschema@.cipher_key_table IN EXCLUSIVE MODE;
+
+    -- Get next key version (after lock to prevent race condition)
+    SELECT COALESCE(MAX(key_version), 0) + 1 INTO v_key_id FROM @extschema@.cipher_key_table;
+
+    IF v_key_id > 32767 THEN
+        RAISE EXCEPTION 'maximum key version (32767) exceeded'
+            USING ERRCODE = 'program_limit_exceeded';
+    END IF;
+
+    -- If activating, retire current active key
+    IF activate THEN
+        UPDATE @extschema@.cipher_key_table
+           SET key_state = 'retired',
+               state_changed_at = now()
+         WHERE key_state = 'active';
+    END IF;
+
+    -- Use dynamic SQL to call pgcrypto in its actual schema (prevents search_path hijacking)
+    EXECUTE format('SELECT %I.pgp_sym_encrypt($1, $2, $3)', v_pgcrypto_schema)
+       INTO v_wrapped_key
+      USING dek, passphrase, 'cipher-algo=aes256, s2k-mode=3';
+
+    -- Insert new key
+    INSERT INTO @extschema@.cipher_key_table(key_version, wrapped_key, algorithm, key_state, state_changed_at)
+    VALUES(
+        v_key_id,
+        v_wrapped_key,
+        'aes',
+        CASE WHEN activate THEN 'active' ELSE 'pending' END,
+        now()
+    );
+
+    RETURN v_key_id;
+END;
+$$;
+
+COMMENT ON FUNCTION register_key(TEXT, TEXT, BOOLEAN) IS
+    'Registers a new encryption key. Log masking is automatic. Returns key ID.';
+
+/*
+ * load_key - Load encryption key(s) into session memory
+ *
+ * Simplified replacement for load_key() with automatic log masking.
+ * Loads the active key by default, or all non-revoked keys if loading for rotation.
+ */
+CREATE FUNCTION load_key(
+    passphrase TEXT,
+    all_versions BOOLEAN DEFAULT false
+) RETURNS BOOLEAN
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO pg_catalog
+AS $$
+DECLARE
+    v_key_version INTEGER;
+    v_count INTEGER := 0;
+    v_prev_key_version TEXT;
+    v_pgcrypto_schema TEXT;
+    v_wrapped_key BYTEA;
+    v_algorithm TEXT;
+    v_decrypted_key TEXT;
+    rec RECORD;
+BEGIN
+    -- Automatic log masking
+    PERFORM @extschema@.pgstat_actv_mask();
+    SET LOCAL track_activities = off;
+
+    -- Save previous GUC value for restore on failure
+    v_prev_key_version := current_setting('encrypt.key_version', true);
+
+    -- Clear existing keys
+    PERFORM @extschema@.enc_rm_key();
+
+    IF passphrase IS NULL OR passphrase = '' THEN
+        RAISE EXCEPTION 'passphrase cannot be null or empty'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- Look up pgcrypto schema dynamically to avoid hardcoding
+    v_pgcrypto_schema := @extschema@._pgcrypto_schema();
+    IF v_pgcrypto_schema IS NULL THEN
+        RAISE EXCEPTION 'pgcrypto extension is not installed'
+            USING ERRCODE = 'feature_not_supported';
+    END IF;
+
+    IF all_versions THEN
+        -- Load all non-revoked keys (for rotation workflows)
+        FOR rec IN
+            SELECT key_version, wrapped_key, algorithm
+              FROM @extschema@.cipher_key_table
+             WHERE key_state <> 'revoked'
+             ORDER BY key_version
+        LOOP
+            BEGIN
+                PERFORM set_config('encrypt.key_version', rec.key_version::text, true);
+                -- Use dynamic SQL to call pgcrypto in its actual schema (prevents search_path hijacking)
+                EXECUTE format('SELECT %I.pgp_sym_decrypt($1, $2)', v_pgcrypto_schema)
+                   INTO v_decrypted_key
+                  USING rec.wrapped_key, passphrase;
+                PERFORM @extschema@.enc_store_key(v_decrypted_key, rec.algorithm);
+
+                v_count := v_count + 1;
+            EXCEPTION
+                WHEN OTHERS THEN
+                    PERFORM @extschema@.enc_rm_key();
+                    -- Restore previous GUC value (encrypt.key_version is INTEGER with min=1)
+                    IF v_prev_key_version IS NOT NULL AND v_prev_key_version <> '' THEN
+                        PERFORM set_config('encrypt.key_version', v_prev_key_version, false);
+                    ELSE
+                        -- Reset to default (1) since empty string is invalid for integer GUC
+                        EXECUTE 'RESET encrypt.key_version';
+                    END IF;
+                    RAISE EXCEPTION 'failed to decrypt key version %: incorrect passphrase', rec.key_version
+                        USING ERRCODE = 'invalid_password';
+            END;
+        END LOOP;
+
+        -- Set current version to active key
+        SELECT key_version INTO v_key_version
+          FROM @extschema@.cipher_key_table WHERE key_state = 'active';
+        IF FOUND THEN
+            PERFORM set_config('encrypt.key_version', v_key_version::text, false);
+        END IF;
+    ELSE
+        -- Load only active key
+        SELECT key_version, wrapped_key, algorithm
+          INTO v_key_version, v_wrapped_key, v_algorithm
+          FROM @extschema@.cipher_key_table WHERE key_state = 'active';
+
+        IF NOT FOUND THEN
+            RETURN false;
+        END IF;
+
+        BEGIN
+            PERFORM set_config('encrypt.key_version', v_key_version::text, false);
+            -- Use dynamic SQL to call pgcrypto in its actual schema (prevents search_path hijacking)
+            EXECUTE format('SELECT %I.pgp_sym_decrypt($1, $2)', v_pgcrypto_schema)
+               INTO v_decrypted_key
+              USING v_wrapped_key, passphrase;
+            PERFORM @extschema@.enc_store_key(v_decrypted_key, v_algorithm);
+
+            -- Update usage statistics
+            UPDATE @extschema@.cipher_key_table
+               SET last_used_at = now(),
+                   use_count = use_count + 1
+             WHERE key_version = v_key_version;
+
+            v_count := 1;
+        EXCEPTION
+            WHEN OTHERS THEN
+                PERFORM @extschema@.enc_rm_key();
+                -- Restore previous GUC value (encrypt.key_version is INTEGER with min=1)
+                IF v_prev_key_version IS NOT NULL AND v_prev_key_version <> '' THEN
+                    PERFORM set_config('encrypt.key_version', v_prev_key_version, false);
+                ELSE
+                    -- Reset to default (1) since empty string is invalid for integer GUC
+                    EXECUTE 'RESET encrypt.key_version';
+                END IF;
+                RAISE EXCEPTION 'incorrect passphrase'
+                    USING ERRCODE = 'invalid_password';
+        END;
+    END IF;
+
+    RETURN v_count > 0;
+END;
+$$;
+
+COMMENT ON FUNCTION load_key(TEXT, BOOLEAN) IS
+    'Loads encryption key(s) into session. Use all_versions=true for rotation workflows.';
+
+/*
+ * unload_key - Clear all keys from session memory
+ */
+CREATE FUNCTION unload_key() RETURNS VOID
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO pg_catalog
+AS $$
+BEGIN
+    PERFORM @extschema@.enc_rm_key();
+END;
+$$;
+
+COMMENT ON FUNCTION unload_key() IS
+    'Removes all encryption keys from session memory (secure wipe).';
+
+/*
+ * activate_key - Make a key version the active key
+ */
+CREATE FUNCTION activate_key(key_id INTEGER) RETURNS BOOLEAN
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO pg_catalog
+AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM @extschema@.cipher_key_table
+        WHERE key_version = key_id AND key_state <> 'revoked'
+    ) THEN
+        RETURN false;
+    END IF;
+
+    -- Check if key is expired
+    IF EXISTS (
+        SELECT 1 FROM @extschema@.cipher_key_table
+        WHERE key_version = key_id
+          AND expires_at IS NOT NULL
+          AND expires_at <= now()
+    ) THEN
+        RAISE EXCEPTION 'cannot activate expired key'
+            USING ERRCODE = 'data_exception';
+    END IF;
+
+    UPDATE @extschema@.cipher_key_table
+       SET key_state = CASE
+               WHEN key_version = key_id THEN 'active'
+               WHEN key_state = 'active' THEN 'retired'
+               ELSE key_state
+           END,
+           state_changed_at = CASE
+               WHEN key_version = key_id OR key_state = 'active' THEN now()
+               ELSE state_changed_at
+           END
+     WHERE key_state <> 'revoked';
+
+    PERFORM set_config('encrypt.key_version', key_id::text, false);
+
+    RETURN true;
+END;
+$$;
+
+COMMENT ON FUNCTION activate_key(INTEGER) IS
+    'Makes the specified key version the active key for new encryptions.';
+
+/*
+ * revoke_key - Revoke a key version (prevents loading)
+ */
+CREATE FUNCTION revoke_key(key_id INTEGER) RETURNS BOOLEAN
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO pg_catalog
+AS $$
+BEGIN
+    UPDATE @extschema@.cipher_key_table
+       SET key_state = 'revoked',
+           state_changed_at = now()
+     WHERE key_version = key_id;
+
+    RETURN FOUND;
+END;
+$$;
+
+COMMENT ON FUNCTION revoke_key(INTEGER) IS
+    'Revokes a key version, preventing it from being loaded.';
+
+/*
+ * =============================================================================
+ * SIMPLIFIED OPERATIONS
+ * =============================================================================
+ */
+
+/*
+ * rotate - Re-encrypt column data with current active key
+ */
+CREATE FUNCTION rotate(
+    schema_name TEXT,
+    table_name TEXT,
+    column_name TEXT,
+    batch_size INTEGER DEFAULT 10000
+) RETURNS BIGINT
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO pg_catalog
+AS $$
+DECLARE
+    v_col_type TEXT;
+    v_col_type_qualified TEXT;
+    v_sql TEXT;
+    v_count BIGINT := 0;
+    v_batch BIGINT;
+    -- Effective role: honors SET ROLE if used, otherwise falls back to session_user.
+    -- Note: COALESCE/NULLIF are SQL constructs, not pg_catalog functions.
+    v_effective_role NAME := COALESCE(
+        NULLIF(NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
+        pg_catalog.session_user()
+    );
+BEGIN
+    IF current_setting('encrypt.enable', true) <> 'on' THEN
+        RAISE EXCEPTION 'encryption must be enabled (SET encrypt.enable = on)'
+            USING ERRCODE = 'feature_not_supported';
+    END IF;
+
+    IF batch_size IS NULL OR batch_size <= 0 THEN
+        RAISE EXCEPTION 'batch_size must be greater than 0'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- Validate inputs
+    IF schema_name !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' OR
+       table_name  !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' OR
+       column_name !~ '^[a-zA-Z_][a-zA-Z0-9_]*$' THEN
+        RAISE EXCEPTION 'invalid identifier'
+            USING ERRCODE = 'invalid_name';
+    END IF;
+
+    -- Get both typname (for comparison) and safely-quoted schema-qualified name (for dynamic SQL)
+    SELECT t.typname, pg_catalog.format('%I.%I', tn.nspname, t.typname)
+      INTO v_col_type, v_col_type_qualified
+      FROM pg_catalog.pg_attribute a
+      JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+      JOIN pg_catalog.pg_namespace tn ON tn.oid = t.typnamespace
+     WHERE n.nspname = schema_name
+       AND c.relname = table_name
+       AND a.attname = column_name
+       AND a.attnum > 0
+       AND NOT a.attisdropped;
+
+    IF v_col_type IS NULL THEN
+        RAISE EXCEPTION 'column %.%.% not found', schema_name, table_name, column_name
+            USING ERRCODE = 'undefined_column';
+    END IF;
+
+    IF v_col_type NOT IN ('encrypted_text', 'encrypted_bytea') THEN
+        RAISE EXCEPTION 'column is not an encrypted type'
+            USING ERRCODE = 'wrong_object_type';
+    END IF;
+
+    -- Verify effective role has UPDATE privilege (honors SET ROLE, prevents escalation)
+    IF NOT pg_catalog.has_table_privilege(
+        v_effective_role,
+        pg_catalog.format('%I.%I', schema_name, table_name),
+        'UPDATE'
+    ) THEN
+        RAISE EXCEPTION 'permission denied for table %.%', schema_name, table_name
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    IF NOT pg_catalog.has_column_privilege(
+        v_effective_role,
+        pg_catalog.format('%I.%I', schema_name, table_name),
+        column_name,
+        'UPDATE'
+    ) THEN
+        RAISE EXCEPTION 'permission denied for column %', column_name
+            USING ERRCODE = 'insufficient_privilege';
+    END IF;
+
+    -- Process in batches
+    LOOP
+        v_sql := format(
+            'WITH batch AS (
+                SELECT ctid
+                  FROM %I.%I
+                 WHERE %I IS NOT NULL
+                   AND @extschema@.enc_key_version(%I) <> current_setting(''encrypt.key_version'')::integer
+                 LIMIT %s
+             )
+             UPDATE %I.%I AS t
+                SET %I = t.%I::text::%s
+               FROM batch
+              WHERE t.ctid = batch.ctid',
+            schema_name, table_name, column_name, column_name, batch_size,
+            schema_name, table_name, column_name, column_name, v_col_type_qualified
+        );
+
+        EXECUTE v_sql;
+        GET DIAGNOSTICS v_batch = ROW_COUNT;
+
+        EXIT WHEN v_batch = 0;
+        v_count := v_count + v_batch;
+    END LOOP;
+
+    RETURN v_count;
+END;
+$$;
+
+COMMENT ON FUNCTION rotate(TEXT, TEXT, TEXT, INTEGER) IS
+    'Re-encrypts entire column with the active key. batch_size controls internal UPDATE chunk size. Returns total rows processed.';
+
+/*
+ * verify - Verify encrypted column can be decrypted
+ */
+CREATE FUNCTION verify(
+    schema_name TEXT,
+    table_name TEXT,
+    column_name TEXT,
+    sample_size INTEGER DEFAULT 100
+) RETURNS TABLE(
+    status TEXT,
+    total_rows BIGINT,
+    sampled_rows BIGINT,
+    decrypted_ok BIGINT,
+    message TEXT
+)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO pg_catalog
+AS $$
+DECLARE
+    v_total BIGINT;
+    v_sampled BIGINT := 0;
+    v_ok BIGINT := 0;
+    v_col_type TEXT;
+    rec RECORD;
+    -- Effective role: honors SET ROLE if used, otherwise falls back to session_user.
+    -- Note: COALESCE/NULLIF are SQL constructs, not pg_catalog functions.
+    v_effective_role NAME := COALESCE(
+        NULLIF(NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
+        pg_catalog.session_user()
+    );
+BEGIN
+    IF sample_size IS NULL OR sample_size <= 0 THEN
+        RAISE EXCEPTION 'sample_size must be greater than 0'
+            USING ERRCODE = 'invalid_parameter_value';
+    END IF;
+
+    -- Get column type
+    SELECT t.typname
+      INTO v_col_type
+      FROM pg_catalog.pg_attribute a
+      JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+     WHERE n.nspname = schema_name
+       AND c.relname = table_name
+       AND a.attname = column_name
+       AND a.attnum > 0
+       AND NOT a.attisdropped;
+
+    IF v_col_type IS NULL THEN
+        status := 'error';
+        message := 'column not found';
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    IF v_col_type NOT IN ('encrypted_text', 'encrypted_bytea') THEN
+        status := 'error';
+        message := 'not an encrypted column';
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    -- Verify effective role has SELECT privilege (honors SET ROLE, prevents escalation)
+    IF NOT pg_catalog.has_table_privilege(
+        v_effective_role,
+        pg_catalog.format('%I.%I', schema_name, table_name),
+        'SELECT'
+    ) THEN
+        status := 'error';
+        message := 'permission denied for table';
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    IF NOT pg_catalog.has_column_privilege(
+        v_effective_role,
+        pg_catalog.format('%I.%I', schema_name, table_name),
+        column_name,
+        'SELECT'
+    ) THEN
+        status := 'error';
+        message := 'permission denied for column';
+        RETURN NEXT;
+        RETURN;
+    END IF;
+
+    -- Count total rows
+    EXECUTE format('SELECT count(*) FROM %I.%I WHERE %I IS NOT NULL',
+        schema_name, table_name, column_name) INTO v_total;
+
+    -- Try to decrypt sample
+    FOR rec IN EXECUTE format(
+        'SELECT ctid FROM %I.%I WHERE %I IS NOT NULL LIMIT %s',
+        schema_name, table_name, column_name, sample_size
+    ) LOOP
+        v_sampled := v_sampled + 1;
+        BEGIN
+            EXECUTE format('SELECT %I::text FROM %I.%I WHERE ctid = $1',
+                column_name, schema_name, table_name) USING rec.ctid;
+            v_ok := v_ok + 1;
+        EXCEPTION WHEN OTHERS THEN
+            NULL; -- Count as failure
+        END;
+    END LOOP;
+
+    total_rows := v_total;
+    sampled_rows := v_sampled;
+    decrypted_ok := v_ok;
+
+    IF v_sampled = 0 THEN
+        status := 'ok';
+        message := 'no data to verify';
+    ELSIF v_ok = v_sampled THEN
+        status := 'ok';
+        message := format('all %s sampled rows decrypted successfully', v_sampled);
+    ELSE
+        status := 'error';
+        message := format('%s of %s rows failed to decrypt', v_sampled - v_ok, v_sampled);
+    END IF;
+
+    RETURN NEXT;
+END;
+$$;
+
+COMMENT ON FUNCTION verify(TEXT, TEXT, TEXT, INTEGER) IS
+    'Verifies that encrypted column data can be decrypted with loaded keys.';
+
+/*
+ * =============================================================================
+ * SIMPLIFIED METADATA
+ * =============================================================================
+ */
+
+/*
+ * keys - View registered keys
+ */
+CREATE FUNCTION keys() RETURNS TABLE(
+    key_id INTEGER,
+    key_state TEXT,
+    algorithm TEXT,
+    created_at TIMESTAMPTZ,
+    last_used TIMESTAMPTZ,
+    use_count BIGINT
+)
+    LANGUAGE sql SECURITY DEFINER
+    SET search_path TO pg_catalog
+AS $$
+    SELECT key_version, key_state, algorithm, created_at, last_used_at, use_count
+      FROM @extschema@.cipher_key_table
+     ORDER BY key_version;
+$$;
+
+COMMENT ON FUNCTION keys() IS
+    'Lists all registered encryption keys with their state and usage.';
+
+/*
+ * status - Quick status check
+ */
+CREATE FUNCTION status() RETURNS TABLE(
+    key_loaded BOOLEAN,
+    active_key_version INTEGER,
+    session_keys INTEGER[],
+    encrypted_column_count INTEGER
+)
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO pg_catalog
+AS $$
+DECLARE
+    v_loaded INTEGER[];
+    v_active INTEGER;
+    v_columns INTEGER;
+BEGIN
+    v_loaded := @extschema@.loaded_cipher_key_versions();
+
+    SELECT key_version INTO v_active
+      FROM @extschema@.cipher_key_table WHERE key_state = 'active';
+
+    SELECT count(*) INTO v_columns
+      FROM pg_catalog.pg_attribute a
+      JOIN pg_catalog.pg_type t ON t.oid = a.atttypid
+      JOIN pg_catalog.pg_class c ON c.oid = a.attrelid
+     WHERE t.typname IN ('encrypted_text', 'encrypted_bytea')
+       AND c.relkind = 'r'
+       AND a.attnum > 0
+       AND NOT a.attisdropped;
+
+    key_loaded := array_length(v_loaded, 1) IS NOT NULL;
+    active_key_version := v_active;
+    session_keys := v_loaded;
+    encrypted_column_count := v_columns;
+
+    RETURN NEXT;
+END;
+$$;
+
+COMMENT ON FUNCTION status() IS
+    'Quick status check: key loaded, active key, encrypted columns count.';
+
+/*
+ * blind_index - Create searchable blind index
+ *
+ * Uses dynamic SQL to call pgcrypto's hmac() in its actual schema.
+ * SECURITY DEFINER to access internal _pgcrypto_schema() helper.
+ * STABLE because it depends on pgcrypto extension location (catalog lookup).
+ */
+CREATE FUNCTION blind_index(value TEXT, hmac_key TEXT) RETURNS TEXT
+    LANGUAGE plpgsql STABLE STRICT SECURITY DEFINER
+    SET search_path TO pg_catalog
+AS $$
+DECLARE
+    v_pgcrypto_schema TEXT;
+    v_result TEXT;
+BEGIN
+    -- Use centralized helper for pgcrypto schema lookup
+    v_pgcrypto_schema := @extschema@._pgcrypto_schema();
+
+    IF v_pgcrypto_schema IS NULL THEN
+        RAISE EXCEPTION 'pgcrypto extension is not installed'
+            USING ERRCODE = 'feature_not_supported';
+    END IF;
+
+    -- Use dynamic SQL to call hmac in its actual schema
+    EXECUTE format('SELECT pg_catalog.encode(%I.hmac(pg_catalog.convert_to($1, ''UTF8''), pg_catalog.convert_to($2, ''UTF8''), ''sha256''), ''hex'')', v_pgcrypto_schema)
+       INTO v_result
+      USING value, hmac_key;
+
+    RETURN v_result;
+END;
+$$;
+
+COMMENT ON FUNCTION blind_index(TEXT, TEXT) IS
+    'Creates HMAC-SHA256 blind index for searchable encryption.';
+
+/*
+ * =============================================================================
+ * SIMPLIFIED ROLE
+ * =============================================================================
+ */
+
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'column_encrypt_user') THEN
+        EXECUTE 'CREATE ROLE column_encrypt_user NOLOGIN';
+    END IF;
+END;
+$$;
+
+COMMENT ON ROLE column_encrypt_user IS
+    'Unified role for column_encrypt users (replaces admin/runtime/reader roles)';
+
+-- Grant new API to unified role
+GRANT USAGE ON SCHEMA @extschema@ TO column_encrypt_user;
+GRANT EXECUTE ON FUNCTION register_key(TEXT, TEXT, BOOLEAN) TO column_encrypt_user;
+GRANT EXECUTE ON FUNCTION load_key(TEXT, BOOLEAN) TO column_encrypt_user;
+GRANT EXECUTE ON FUNCTION unload_key() TO column_encrypt_user;
+GRANT EXECUTE ON FUNCTION activate_key(INTEGER) TO column_encrypt_user;
+GRANT EXECUTE ON FUNCTION revoke_key(INTEGER) TO column_encrypt_user;
+GRANT EXECUTE ON FUNCTION rotate(TEXT, TEXT, TEXT, INTEGER) TO column_encrypt_user;
+GRANT EXECUTE ON FUNCTION verify(TEXT, TEXT, TEXT, INTEGER) TO column_encrypt_user;
+GRANT EXECUTE ON FUNCTION keys() TO column_encrypt_user;
+GRANT EXECUTE ON FUNCTION status() TO column_encrypt_user;
+GRANT EXECUTE ON FUNCTION blind_index(TEXT, TEXT) TO column_encrypt_user;
+GRANT EXECUTE ON FUNCTION loaded_cipher_key_versions() TO column_encrypt_user;
+
+-- Revoke PUBLIC access to encrypt schema functions
+REVOKE EXECUTE ON FUNCTION register_key(TEXT, TEXT, BOOLEAN) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION load_key(TEXT, BOOLEAN) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION unload_key() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION activate_key(INTEGER) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION revoke_key(INTEGER) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION rotate(TEXT, TEXT, TEXT, INTEGER) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION verify(TEXT, TEXT, TEXT, INTEGER) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION keys() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION status() FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION blind_index(TEXT, TEXT) FROM PUBLIC;
+
+-- Also grant to existing roles for compatibility
+GRANT USAGE ON SCHEMA @extschema@ TO column_encrypt_admin;
+GRANT USAGE ON SCHEMA @extschema@ TO column_encrypt_runtime;
+GRANT USAGE ON SCHEMA @extschema@ TO column_encrypt_reader;
+
+-- Use dynamic SQL because IN SCHEMA requires a literal schema name
+DO $$
+DECLARE
+    v_extschema TEXT;
+BEGIN
+    SELECT n.nspname INTO v_extschema
+      FROM pg_catalog.pg_extension e
+      JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+     WHERE e.extname = 'column_encrypt';
+    EXECUTE pg_catalog.format('GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA %I TO column_encrypt_admin', v_extschema);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION load_key(TEXT, BOOLEAN) TO column_encrypt_runtime;
+GRANT EXECUTE ON FUNCTION unload_key() TO column_encrypt_runtime;
+GRANT EXECUTE ON FUNCTION keys() TO column_encrypt_runtime;
+GRANT EXECUTE ON FUNCTION status() TO column_encrypt_runtime;
+GRANT EXECUTE ON FUNCTION blind_index(TEXT, TEXT) TO column_encrypt_runtime;
+GRANT EXECUTE ON FUNCTION keys() TO column_encrypt_reader;
+GRANT EXECUTE ON FUNCTION status() TO column_encrypt_reader;
+
+/*
+ * =============================================================================
+ * DEPRECATION NOTICES
+ * =============================================================================
+ * The following functions are deprecated and will be removed in v4.0.
+ * Use the encrypt.* equivalents instead.
+ */
+
+-- Wrap old functions to emit deprecation notices
+
+CREATE OR REPLACE FUNCTION cipher_key_disable_log() RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO pg_catalog
+AS $$
+BEGIN
+    RAISE NOTICE 'DEPRECATED: cipher_key_disable_log() is no longer needed. encrypt.* functions handle log masking automatically.';
+    SET track_activities = off;
+    RETURN TRUE;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION cipher_key_enable_log() RETURNS boolean
+    LANGUAGE plpgsql SECURITY DEFINER
+    SET search_path TO pg_catalog
+AS $$
+BEGIN
+    RAISE NOTICE 'DEPRECATED: cipher_key_enable_log() is no longer needed. encrypt.* functions handle log masking automatically.';
+    SET track_activities = DEFAULT;
+    RETURN TRUE;
+END;
+$$;
+
+-- Add deprecation comment
+COMMENT ON FUNCTION cipher_key_disable_log() IS
+    'DEPRECATED in v3.3. Use encrypt.* functions which handle log masking automatically.';
+COMMENT ON FUNCTION cipher_key_enable_log() IS
+    'DEPRECATED in v3.3. Use encrypt.* functions which handle log masking automatically.';
+COMMENT ON FUNCTION register_cipher_key(text, text, text) IS
+    'DEPRECATED in v3.3. Use encrypt.register_key() instead.';
+COMMENT ON FUNCTION register_cipher_key(text, text, text, integer, boolean, timestamptz, text) IS
+    'DEPRECATED in v3.3. Use encrypt.register_key() instead.';
+COMMENT ON FUNCTION load_key(text) IS
+    'DEPRECATED in v3.3. Use encrypt.load_key() instead.';
+COMMENT ON FUNCTION load_key_by_version(text, integer) IS
+    'DEPRECATED in v3.3. Use encrypt.load_key(passphrase, all_versions => true) instead.';
+COMMENT ON FUNCTION rm_key_details() IS
+    'DEPRECATED in v3.3. Use encrypt.unload_key() instead.';
+COMMENT ON FUNCTION activate_cipher_key(integer) IS
+    'DEPRECATED in v3.3. Use encrypt.activate_key() instead.';
+COMMENT ON FUNCTION revoke_cipher_key(integer) IS
+    'DEPRECATED in v3.3. Use encrypt.revoke_key() instead.';
+COMMENT ON FUNCTION cipher_key_versions() IS
+    'DEPRECATED in v3.3. Use encrypt.keys() instead.';
+COMMENT ON FUNCTION cipher_key_reencrypt_data(text, text, text) IS
+    'DEPRECATED in v3.3. Use encrypt.rotate() instead.';
+COMMENT ON FUNCTION cipher_key_reencrypt_data_batch(text, text, text, integer) IS
+    'DEPRECATED in v3.3. Use encrypt.rotate() instead.';
+COMMENT ON FUNCTION cipher_verify_column_encryption(text, text, text, integer) IS
+    'DEPRECATED in v3.3. Use encrypt.verify() instead.';
+
+/*
+ * =============================================================================
+ * FEATURES MARKED FOR REMOVAL IN v4.0
+ * =============================================================================
+ * The following features are out of scope for an encryption extension
+ * and will be removed in v4.0:
+ *
+ * - cipher_key_audit_log table and related functions (use pg_audit instead)
+ * - Rate limiting functions (use application-level or fail2ban)
+ * - Coverage audit functions (use separate compliance tool)
+ * - Rotation job scheduler (use pg_cron for scheduling)
+ * - Monitoring/metrics functions (query pg_catalog directly)
+ */
+
+-- Mark for removal
+COMMENT ON TABLE cipher_key_audit_log IS
+    'DEPRECATED in v3.3. Will be removed in v4.0. Use pg_audit extension instead.';
+
+COMMENT ON FUNCTION cipher_key_check_expired() IS
+    'DEPRECATED in v3.3. Will be removed in v4.0. Query encrypt.keys() directly.';
+COMMENT ON FUNCTION cipher_key_audit_log_view(integer, integer) IS
+    'DEPRECATED in v3.3. Will be removed in v4.0. Use pg_audit extension.';
+COMMENT ON FUNCTION cipher_key_logical_replication_check(text, text) IS
+    'DEPRECATED in v3.3. Will be removed in v4.0. See documentation for replication guidance.';
+COMMENT ON FUNCTION is_key_loaded() IS
+    'DEPRECATED in v3.3. Use encrypt.status() instead.';
+COMMENT ON FUNCTION loaded_cipher_key_versions() IS
+    'DEPRECATED in v3.3. Use encrypt.status() instead.';

@@ -1,281 +1,306 @@
--- column_encrypt regression tests
+-- column_encrypt regression tests (v4.0 API)
+--
+-- Tests the simplified encrypt.* schema API introduced in v4.0.
+-- Uses single column_encrypt_user role instead of 3-role system.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
+-- Create the encrypt schema (required for the extension)
+CREATE SCHEMA IF NOT EXISTS encrypt;
 CREATE EXTENSION IF NOT EXISTS column_encrypt;
 
+-- Set search_path to include the encrypt schema (extension's fixed schema)
+-- public first so table creations go there, encrypt for type resolution
+SET search_path TO public, encrypt, pg_catalog;
+
+-- =============================================================================
+-- ROLE SETUP
+-- =============================================================================
+
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'regress_admin') THEN
-        EXECUTE 'DROP ROLE regress_admin';
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'regress_user') THEN
+        EXECUTE 'DROP ROLE regress_user';
     END IF;
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'regress_runtime') THEN
-        EXECUTE 'DROP ROLE regress_runtime';
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'regress_reader') THEN
-        EXECUTE 'DROP ROLE regress_reader';
-    END IF;
-    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'regress_app') THEN
-        EXECUTE 'DROP ROLE regress_app';
+    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'regress_unprivileged') THEN
+        EXECUTE 'DROP ROLE regress_unprivileged';
     END IF;
 END;
 $$;
 
-CREATE ROLE regress_admin LOGIN;
-CREATE ROLE regress_runtime LOGIN;
-CREATE ROLE regress_reader LOGIN;
-CREATE ROLE regress_app LOGIN;
+CREATE ROLE regress_user LOGIN;
+CREATE ROLE regress_unprivileged LOGIN;
 
-GRANT column_encrypt_admin TO regress_admin;
-GRANT column_encrypt_runtime TO regress_runtime;
-GRANT column_encrypt_reader TO regress_reader;
+-- Grant the unified role
+GRANT column_encrypt_user TO regress_user;
 
-SELECT has_function_privilege('regress_admin', 'register_cipher_key(text,text,text)', 'EXECUTE');
-SELECT has_function_privilege('regress_runtime', 'load_key(text)', 'EXECUTE');
-SELECT has_function_privilege('regress_runtime', 'register_cipher_key(text,text,text)', 'EXECUTE');
-SELECT has_function_privilege('regress_reader', 'cipher_key_versions()', 'EXECUTE');
-SELECT has_function_privilege('regress_app', 'load_key(text)', 'EXECUTE');
-SELECT has_function_privilege('regress_runtime', 'loaded_cipher_key_versions()', 'EXECUTE');
-SELECT has_function_privilege('regress_app', 'rm_key_details()', 'EXECUTE');
+-- Grant CREATE on public schema (required for PG15+ where public has no default CREATE)
+GRANT CREATE ON SCHEMA public TO regress_user;
 
-SET ROLE regress_admin;
-SELECT cipher_key_disable_log();
-SELECT register_cipher_key('my-data-encryption-key-v1', 'aes', 'my-master-passphrase');
-SELECT cipher_key_enable_log();
+-- Verify privilege grants
+SELECT has_function_privilege('regress_user', 'encrypt.register_key(text,text,boolean)', 'EXECUTE');
+SELECT has_function_privilege('regress_user', 'encrypt.load_key(text,boolean)', 'EXECUTE');
+SELECT has_function_privilege('regress_user', 'encrypt.unload_key()', 'EXECUTE');
+SELECT has_function_privilege('regress_user', 'encrypt.keys()', 'EXECUTE');
+SELECT has_function_privilege('regress_user', 'encrypt.rotate(text,text,text,integer)', 'EXECUTE');
+
+-- Unprivileged user should not have access
+SELECT has_function_privilege('regress_unprivileged', 'encrypt.register_key(text,text,boolean)', 'EXECUTE');
+SELECT has_function_privilege('regress_unprivileged', 'encrypt.load_key(text,boolean)', 'EXECUTE');
+
+-- =============================================================================
+-- KEY REGISTRATION (no disable_log ceremony needed - automatic log masking)
+-- =============================================================================
+
+SET ROLE regress_user;
+
+-- Register first key (auto-assigned version 1, active by default)
+SELECT encrypt.register_key('my-data-encryption-key-v1', 'my-master-passphrase');
+
+-- Check key was registered
+SELECT key_id, key_state, algorithm FROM encrypt.keys() WHERE key_id = 1;
+
 RESET ROLE;
 
-SET ROLE regress_runtime;
-SELECT load_key('my-master-passphrase');
+-- =============================================================================
+-- KEY LOADING
+-- =============================================================================
+
+SET ROLE regress_user;
+
+-- Load key into session
+SELECT encrypt.load_key('my-master-passphrase');
+
+-- Verify key is loaded
 SELECT loaded_cipher_key_versions();
+
+-- Check status
+SELECT key_loaded, active_key_version FROM encrypt.status();
+
 RESET ROLE;
 
-SET ROLE regress_runtime;
-DO $$
-BEGIN
-    BEGIN
-        PERFORM register_cipher_key('unexpected', 'aes', 'unexpected');
-        RAISE EXCEPTION 'register_cipher_key unexpectedly succeeded';
-    EXCEPTION
-        WHEN insufficient_privilege THEN
-            RAISE NOTICE 'register_cipher_key denied for regress_runtime';
-    END;
-END;
-$$;
-RESET ROLE;
+-- =============================================================================
+-- ENCRYPTED COLUMN USAGE
+-- =============================================================================
 
-SET ROLE regress_app;
-DO $$
-BEGIN
-    BEGIN
-        PERFORM load_key('my-master-passphrase');
-        RAISE EXCEPTION 'load_key unexpectedly succeeded';
-    EXCEPTION
-        WHEN insufficient_privilege THEN
-            RAISE NOTICE 'load_key denied for regress_app';
-    END;
-END;
-$$;
-RESET ROLE;
+-- Create tables as regress_user so privilege checks work correctly.
+-- (rotate/verify check the effective role's privileges, not superuser)
+SET ROLE regress_user;
 
-SET ROLE regress_runtime;
-DO $$
-BEGIN
-    BEGIN
-        PERFORM revoke_cipher_key(1);
-        RAISE EXCEPTION 'revoke_cipher_key unexpectedly succeeded';
-    EXCEPTION
-        WHEN insufficient_privilege THEN
-            RAISE NOTICE 'revoke_cipher_key denied for regress_runtime';
-    END;
-END;
-$$;
-RESET ROLE;
-
-SET ROLE regress_app;
-DO $$
-BEGIN
-    BEGIN
-        PERFORM rm_key_details();
-        RAISE EXCEPTION 'rm_key_details unexpectedly succeeded';
-    EXCEPTION
-        WHEN insufficient_privilege THEN
-            RAISE NOTICE 'rm_key_details denied for regress_app';
-    END;
-END;
-$$;
-RESET ROLE;
-
+-- Test encrypted_text type
 CREATE TABLE test_enc_text (id serial, ssn encrypted_text);
 INSERT INTO test_enc_text(ssn) VALUES ('123-45-6789');
 INSERT INTO test_enc_text(ssn) VALUES ('987-65-4321');
 SELECT ssn FROM test_enc_text ORDER BY id;
-SELECT COUNT(*) FROM test_enc_text WHERE ssn = '123-45-6789'::encrypted_text;
-SELECT column_encrypt_blind_index_text('123-45-6789', 'blind-index-secret');
 
+-- Equality comparison
+SELECT COUNT(*) FROM test_enc_text WHERE ssn = '123-45-6789'::encrypted_text;
+
+-- Test encrypted_bytea type
 CREATE TABLE test_enc_bytea (id serial, data encrypted_bytea);
 INSERT INTO test_enc_bytea(data) VALUES ('hello'::bytea);
 INSERT INTO test_enc_bytea(data) VALUES ('world'::bytea);
 SELECT data FROM test_enc_bytea ORDER BY id;
-SELECT column_encrypt_blind_index_bytea('hello'::bytea, 'blind-index-secret');
-SELECT loaded_cipher_key_versions();
-SELECT col_enc_send_text('123-45-6789'::encrypted_text);
-SELECT col_enc_send_bytea('hello'::encrypted_bytea);
+
+RESET ROLE;
+
+-- =============================================================================
+-- BLIND INDEX
+-- =============================================================================
+
+-- Basic blind index generation
+SELECT encrypt.blind_index('123-45-6789', 'blind-index-secret');
+
+-- Consistency test: same input should produce same output
+SELECT encrypt.blind_index('test-value', 'secret-key') = encrypt.blind_index('test-value', 'secret-key') AS consistent;
+
+-- Different inputs produce different outputs
+SELECT encrypt.blind_index('value-a', 'key') <> encrypt.blind_index('value-b', 'key') AS different_values;
+
+-- Different keys produce different outputs
+SELECT encrypt.blind_index('same-value', 'key-1') <> encrypt.blind_index('same-value', 'key-2') AS different_keys;
+
+-- Output format: should be 64 hex characters (SHA-256 = 256 bits = 64 hex chars)
+SELECT length(encrypt.blind_index('test', 'key')) AS hex_length;
+
+-- STRICT function returns NULL for NULL inputs
+SELECT encrypt.blind_index(NULL, 'key') IS NULL AS null_value_returns_null;
+SELECT encrypt.blind_index('value', NULL) IS NULL AS null_key_returns_null;
+
+-- Practical use case: searchable blind index column
+CREATE TABLE test_blind_index (
+    id serial PRIMARY KEY,
+    ssn_encrypted encrypted_text,
+    ssn_blind_index text
+);
+
+-- Insert data with both encrypted value and blind index
+INSERT INTO test_blind_index (ssn_encrypted, ssn_blind_index)
+VALUES ('123-45-6789', encrypt.blind_index('123-45-6789', 'blind-secret'));
+INSERT INTO test_blind_index (ssn_encrypted, ssn_blind_index)
+VALUES ('987-65-4321', encrypt.blind_index('987-65-4321', 'blind-secret'));
+INSERT INTO test_blind_index (ssn_encrypted, ssn_blind_index)
+VALUES ('555-55-5555', encrypt.blind_index('555-55-5555', 'blind-secret'));
+
+-- Search using blind index (efficient lookup without decrypting all rows)
+SELECT id, ssn_encrypted
+FROM test_blind_index
+WHERE ssn_blind_index = encrypt.blind_index('123-45-6789', 'blind-secret');
+
+-- Verify we can find the correct record
+SELECT COUNT(*) AS found_count
+FROM test_blind_index
+WHERE ssn_blind_index = encrypt.blind_index('987-65-4321', 'blind-secret');
+
+-- Non-matching search returns no rows
+SELECT COUNT(*) AS not_found_count
+FROM test_blind_index
+WHERE ssn_blind_index = encrypt.blind_index('000-00-0000', 'blind-secret');
+
+DROP TABLE test_blind_index;
+
+-- =============================================================================
+-- ENCRYPT.ENABLE = OFF MODE
+-- =============================================================================
 
 SET encrypt.enable = off;
+
 CREATE TABLE test_off_mode_text (id serial, val encrypted_text);
 INSERT INTO test_off_mode_text(val) VALUES ('alpha'), ('beta');
 SELECT COUNT(*) FROM test_off_mode_text WHERE val = 'alpha'::encrypted_text;
+
+-- Hash consistency in off mode
 SELECT enc_hash_enctext('alpha'::encrypted_text) = enc_hash_enctext('alpha'::encrypted_text);
 
 CREATE TABLE test_off_mode_bytea (id serial, val encrypted_bytea);
 INSERT INTO test_off_mode_bytea(val) VALUES ('abc'::bytea), ('xyz'::bytea);
 SELECT COUNT(*) FROM test_off_mode_bytea WHERE val = 'abc'::encrypted_bytea;
-SELECT enc_hash_encbytea('abc'::encrypted_bytea) = enc_hash_encbytea('abc'::encrypted_bytea);
+
 SET encrypt.enable = on;
 
-SET ROLE regress_admin;
-SELECT cipher_key_disable_log();
-SELECT register_cipher_key('my-data-encryption-key-v2', 'aes', 'my-master-passphrase', 2, false);
-SELECT cipher_key_enable_log();
-RESET ROLE;
+-- =============================================================================
+-- KEY VERSIONING AND ROTATION
+-- =============================================================================
 
-SET encrypt.key_version = 1;
-SET ROLE regress_runtime;
-SELECT load_key_by_version('my-master-passphrase', 1);
-SELECT load_key_by_version('my-master-passphrase', 2);
-SHOW encrypt.key_version;
-RESET ROLE;
+SET ROLE regress_user;
 
-SET encrypt.key_version = 1;
-DO $$
-BEGIN
-    BEGIN
-        PERFORM load_key_by_version('wrong-passphrase', 2);
-    EXCEPTION
-        WHEN OTHERS THEN
-            IF SQLERRM NOT LIKE 'EDB-ENC0012 %' THEN
-                RAISE;
-            END IF;
-            RAISE NOTICE 'load_key_by_version failed as expected';
-    END;
-END;
-$$;
-SHOW encrypt.key_version;
+-- Register second key version (inactive by default)
+SELECT encrypt.register_key('my-data-encryption-key-v2', 'my-master-passphrase', false);
+
+-- Load all key versions for rotation
+SELECT encrypt.load_key('my-master-passphrase', true);
+
+-- Verify both keys loaded
 SELECT loaded_cipher_key_versions();
 
-SET encrypt.key_version = 2;
-SET ROLE regress_admin;
-SELECT cipher_key_reencrypt_data('public', 'test_enc_text', 'ssn');
-SELECT cipher_key_reencrypt_data('public', 'test_enc_bytea', 'data');
-SELECT activate_cipher_key(2);
+-- Activate v2 for new encryptions
+SELECT encrypt.activate_key(2);
+
+-- Check key states
+SELECT key_id, key_state FROM encrypt.keys() ORDER BY key_id;
+
+-- Rotate data to new key version (activate_key already set encrypt.key_version)
+SELECT encrypt.rotate('public', 'test_enc_text', 'ssn');
+SELECT encrypt.rotate('public', 'test_enc_bytea', 'data');
 RESET ROLE;
 
+-- Verify data still readable after rotation
 SELECT ssn FROM test_enc_text ORDER BY id;
 SELECT data FROM test_enc_bytea ORDER BY id;
 
+-- =============================================================================
+-- BATCH ROTATION
+-- =============================================================================
+
+-- Create table as regress_user so privilege checks work correctly
+SET ROLE regress_user;
 CREATE TABLE test_batch_rotate (id integer PRIMARY KEY, val encrypted_text);
 INSERT INTO test_batch_rotate(id, val)
 SELECT gs, format('secret-%s', gs)
 FROM generate_series(1, 100) AS gs;
 
-SET ROLE regress_admin;
-SELECT cipher_key_disable_log();
-SELECT register_cipher_key('my-data-encryption-key-v3', 'aes', 'my-master-passphrase', 3, false);
-SELECT cipher_key_enable_log();
-RESET ROLE;
+-- Register third key
+SELECT encrypt.register_key('my-data-encryption-key-v3', 'my-master-passphrase', false);
 
-SET ROLE regress_runtime;
-SELECT load_key_by_version('my-master-passphrase', 3);
-RESET ROLE;
+-- Load v3
+SELECT encrypt.load_key('my-master-passphrase', true);
 
-SET encrypt.enable = off;
-DO $$
-BEGIN
-    BEGIN
-        PERFORM cipher_key_reencrypt_data_batch('public', 'test_batch_rotate', 'val', 15);
-        RAISE EXCEPTION 'cipher_key_reencrypt_data_batch unexpectedly succeeded with encrypt.enable=off';
-    EXCEPTION
-        WHEN OTHERS THEN
-            IF SQLERRM NOT LIKE 'EDB-ENC0048 %' THEN
-                RAISE;
-            END IF;
-            RAISE NOTICE 'cipher_key_reencrypt_data_batch blocked when encrypt.enable is off';
-    END;
-END;
-$$;
-SET encrypt.enable = on;
+-- Activate v3 (also sets encrypt.key_version)
+SELECT encrypt.activate_key(3);
 
-SET encrypt.key_version = 3;
+-- Test rotate() with small internal batch_size.
+-- Note: rotate() processes the entire column per call (using batch_size as internal
+-- chunk size). The first call returns the total count; subsequent calls return 0.
 DO $$
 DECLARE
     moved bigint;
     total bigint := 0;
 BEGIN
     LOOP
-        moved := cipher_key_reencrypt_data_batch('public', 'test_batch_rotate', 'val', 15);
+        moved := encrypt.rotate('public', 'test_batch_rotate', 'val', 15);
         EXIT WHEN moved = 0;
         total := total + moved;
     END LOOP;
     RAISE NOTICE 'batch rotated % rows', total;
 END;
 $$;
-
-SET ROLE regress_admin;
-SELECT activate_cipher_key(3);
 RESET ROLE;
 
+-- Verify all data intact
 SELECT COUNT(*) FROM test_batch_rotate WHERE val::text LIKE 'secret-%';
-SELECT key_version, algorithm, key_state FROM cipher_key_versions() ORDER BY key_version;
 
-SET ROLE regress_admin;
-SELECT cipher_key_disable_log();
-SELECT register_cipher_key('my-data-encryption-key-v4', 'aes', 'my-master-passphrase', 4, false);
-SELECT revoke_cipher_key(4);
-SELECT cipher_key_enable_log();
+-- Check final key states
+SELECT key_id, key_state FROM encrypt.keys() ORDER BY key_id;
+
+-- =============================================================================
+-- KEY REVOCATION
+-- =============================================================================
+
+SET ROLE regress_user;
+
+-- Register and immediately revoke a key (DEK must be at least 16 bytes)
+SELECT encrypt.register_key('revoked-key-data-v4', 'my-master-passphrase', false);
+SELECT encrypt.revoke_key(4);
+
+-- Verify revoked key state
+SELECT key_id, key_state FROM encrypt.keys() WHERE key_id = 4;
+
+-- Cannot activate revoked key
+SELECT encrypt.activate_key(4);
+
 RESET ROLE;
 
-SET ROLE regress_runtime;
-SELECT load_key_by_version('my-master-passphrase', 4);
+-- =============================================================================
+-- VERIFICATION
+-- =============================================================================
+
+SET ROLE regress_user;
+
+-- Reload key
+SELECT encrypt.load_key('my-master-passphrase', true);
+
+CREATE TABLE test_verify_enc (id serial, secret encrypted_text);
+INSERT INTO test_verify_enc(secret) VALUES ('verify-test-1'), ('verify-test-2');
+
+-- Verify encryption integrity (returns status, total_rows, sampled_rows, decrypted_ok, message)
+SELECT status, total_rows, sampled_rows, decrypted_ok
+  FROM encrypt.verify('public', 'test_verify_enc', 'secret');
+
+-- Test with invalid column
+SELECT status, message
+  FROM encrypt.verify('public', 'test_verify_enc', 'nonexistent');
+
+-- Test with non-encrypted column
+SELECT status, message
+  FROM encrypt.verify('public', 'test_verify_enc', 'id');
+
+DROP TABLE test_verify_enc;
+
 RESET ROLE;
 
-SET ROLE regress_admin;
-SELECT activate_cipher_key(4);
-RESET ROLE;
-
-SELECT COUNT(*) FROM cipher_key_logical_replication_check('public', 'test_enc_text');
-
-ALTER TABLE test_batch_rotate REPLICA IDENTITY FULL;
-SELECT COUNT(*) FROM cipher_key_logical_replication_check('public', 'test_batch_rotate');
-
-DROP TABLE test_enc_text;
-DROP TABLE test_enc_bytea;
-DROP TABLE test_batch_rotate;
-DROP TABLE test_off_mode_text;
-DROP TABLE test_off_mode_bytea;
-
--- Test: DEK minimum length validation (should fail with short key)
-SET ROLE regress_admin;
-SELECT cipher_key_disable_log();
-DO $$
-BEGIN
-    BEGIN
-        PERFORM register_cipher_key('short', 'aes', 'my-master-passphrase', 99, false);
-        RAISE EXCEPTION 'register_cipher_key unexpectedly succeeded with short key';
-    EXCEPTION
-        WHEN OTHERS THEN
-            IF SQLERRM NOT LIKE 'EDB-ENC0049 %' THEN
-                RAISE;
-            END IF;
-            RAISE NOTICE 'short DEK rejected as expected';
-    END;
-END;
-$$;
-SELECT cipher_key_enable_log();
-RESET ROLE;
-
--- Test: NULL value handling in encrypted columns
-SET ROLE regress_runtime;
-SELECT load_key('my-master-passphrase');
-RESET ROLE;
+-- =============================================================================
+-- NULL HANDLING
+-- =============================================================================
 
 CREATE TABLE test_null_handling (id serial, val encrypted_text);
 INSERT INTO test_null_handling(val) VALUES (NULL);
@@ -284,64 +309,281 @@ SELECT COUNT(*) FROM test_null_handling WHERE val IS NULL;
 SELECT COUNT(*) FROM test_null_handling WHERE val IS NOT NULL;
 DROP TABLE test_null_handling;
 
--- Test: Equality comparison across same plaintext
+-- =============================================================================
+-- EQUALITY AND HASH TESTS
+-- =============================================================================
+
 CREATE TABLE test_equality (id serial, val encrypted_text);
 INSERT INTO test_equality(val) VALUES ('same-value');
 INSERT INTO test_equality(val) VALUES ('same-value');
 INSERT INTO test_equality(val) VALUES ('different-value');
 SELECT COUNT(*) FROM test_equality WHERE val = 'same-value'::encrypted_text;
--- Note: COUNT(DISTINCT) not supported as encrypted types don't have ordering operators
+
+-- GROUP BY works on encrypted types
 SELECT COUNT(*) AS distinct_count FROM (
     SELECT val FROM test_equality GROUP BY val
 ) sub;
 DROP TABLE test_equality;
 
--- Test: Hash consistency for encrypted values
+-- Hash consistency for encrypted_text
 CREATE TABLE test_hash (id serial, val encrypted_text);
 INSERT INTO test_hash(val) VALUES ('hash-test');
 INSERT INTO test_hash(val) VALUES ('hash-test');
--- Hash should be consistent for same plaintext value
 SELECT (enc_hash_enctext(val) = enc_hash_enctext(val)) AS hash_consistent
 FROM test_hash LIMIT 1;
--- Both rows with same plaintext should have same hash
 SELECT COUNT(DISTINCT enc_hash_enctext(val)) AS unique_hashes FROM test_hash;
 DROP TABLE test_hash;
 
--- Test: cipher_key_reencrypt_data with encrypt.enable=off should fail
+-- Hash consistency for encrypted_bytea
+CREATE TABLE test_hash_bytea (id serial, val encrypted_bytea);
+INSERT INTO test_hash_bytea(val) VALUES ('bytea-test'::bytea);
+INSERT INTO test_hash_bytea(val) VALUES ('bytea-test'::bytea);
+SELECT (enc_hash_encbytea(val) = enc_hash_encbytea(val)) AS hash_consistent
+FROM test_hash_bytea LIMIT 1;
+SELECT COUNT(DISTINCT enc_hash_encbytea(val)) AS unique_hashes FROM test_hash_bytea;
+DROP TABLE test_hash_bytea;
+
+-- =============================================================================
+-- ERROR CASES
+-- =============================================================================
+
+-- Binary protocol blocking: col_enc_send raises error
+DO $$
+BEGIN
+    BEGIN
+        PERFORM col_enc_send_text('test'::encrypted_text);
+        RAISE EXCEPTION 'col_enc_send_text unexpectedly succeeded';
+    EXCEPTION
+        WHEN feature_not_supported THEN
+            IF SQLERRM NOT LIKE '%binary protocol is not supported%' THEN
+                RAISE;
+            END IF;
+            RAISE NOTICE 'binary protocol blocked for encrypted_text';
+    END;
+END;
+$$;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM col_enc_send_bytea('test'::bytea::encrypted_bytea);
+        RAISE EXCEPTION 'col_enc_send_bytea unexpectedly succeeded';
+    EXCEPTION
+        WHEN feature_not_supported THEN
+            IF SQLERRM NOT LIKE '%binary protocol is not supported%' THEN
+                RAISE;
+            END IF;
+            RAISE NOTICE 'binary protocol blocked for encrypted_bytea';
+    END;
+END;
+$$;
+
+-- encrypt.rotate with encrypt.enable=off should fail
 SET encrypt.enable = off;
 DO $$
 BEGIN
     BEGIN
-        PERFORM cipher_key_reencrypt_data('public', 'nonexistent', 'col');
-        RAISE EXCEPTION 'cipher_key_reencrypt_data unexpectedly succeeded with encrypt.enable=off';
+        PERFORM encrypt.rotate('public', 'nonexistent', 'col');
+        RAISE EXCEPTION 'encrypt.rotate unexpectedly succeeded with encrypt.enable=off';
     EXCEPTION
         WHEN OTHERS THEN
-            IF SQLERRM NOT LIKE 'EDB-ENC0048 %' THEN
+            IF SQLERRM NOT LIKE '%encryption must be enabled%' THEN
                 RAISE;
             END IF;
-            RAISE NOTICE 'cipher_key_reencrypt_data blocked when encrypt.enable is off';
+            RAISE NOTICE 'encrypt.rotate blocked when encrypt.enable is off';
     END;
 END;
 $$;
 SET encrypt.enable = on;
 
--- Test: cipher_verify_column_encryption function
-CREATE TABLE test_verify_enc (id serial, secret encrypted_text);
-INSERT INTO test_verify_enc(secret) VALUES ('verify-test-1'), ('verify-test-2');
-SELECT check_name, status, total_rows, sampled_rows, decryptable_rows, failed_rows
-  FROM cipher_verify_column_encryption('public', 'test_verify_enc', 'secret');
+-- DEK minimum length validation
+SET ROLE regress_user;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.register_key('short', 'my-master-passphrase', false);
+        RAISE EXCEPTION 'encrypt.register_key unexpectedly succeeded with short key';
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLERRM NOT LIKE '%at least 16 bytes%' THEN
+                RAISE;
+            END IF;
+            RAISE NOTICE 'short DEK rejected as expected';
+    END;
+END;
+$$;
+RESET ROLE;
 
--- Test with invalid column
-SELECT check_name, status
-  FROM cipher_verify_column_encryption('public', 'test_verify_enc', 'nonexistent');
+-- Wrong passphrase
+SET ROLE regress_user;
+DO $$
+BEGIN
+    BEGIN
+        -- First unload to clear session
+        PERFORM encrypt.unload_key();
+        PERFORM encrypt.load_key('wrong-passphrase');
+    EXCEPTION
+        WHEN OTHERS THEN
+            IF SQLERRM NOT LIKE '%incorrect%' AND SQLERRM NOT LIKE '%decryption%' THEN
+                RAISE;
+            END IF;
+            RAISE NOTICE 'wrong passphrase rejected as expected';
+    END;
+END;
+$$;
+RESET ROLE;
 
--- Test with non-encrypted column
-SELECT check_name, status
-  FROM cipher_verify_column_encryption('public', 'test_verify_enc', 'id');
+-- Unprivileged user cannot register keys
+SET ROLE regress_unprivileged;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.register_key('unauthorized', 'passphrase');
+        RAISE EXCEPTION 'encrypt.register_key unexpectedly succeeded for unprivileged user';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'encrypt.register_key denied for unprivileged user';
+    END;
+END;
+$$;
+RESET ROLE;
 
-DROP TABLE test_verify_enc;
+-- Unprivileged user cannot load keys
+SET ROLE regress_unprivileged;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.load_key('any-passphrase');
+        RAISE EXCEPTION 'encrypt.load_key unexpectedly succeeded for unprivileged user';
+    EXCEPTION
+        WHEN insufficient_privilege THEN
+            RAISE NOTICE 'encrypt.load_key denied for unprivileged user';
+    END;
+END;
+$$;
+RESET ROLE;
 
--- Test: cipher_key_versions includes usage statistics
-SELECT key_version, use_count > 0 AS has_usage FROM cipher_key_versions() WHERE key_version = 1;
+-- Empty passphrase should be rejected
+SET ROLE regress_user;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.load_key('');
+        RAISE EXCEPTION 'encrypt.load_key unexpectedly succeeded with empty passphrase';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            RAISE NOTICE 'empty passphrase rejected as expected';
+    END;
+END;
+$$;
+RESET ROLE;
 
-SELECT rm_key_details();
+-- NULL passphrase should be rejected
+SET ROLE regress_user;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.load_key(NULL);
+        RAISE EXCEPTION 'encrypt.load_key unexpectedly succeeded with NULL passphrase';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            RAISE NOTICE 'NULL passphrase rejected as expected';
+    END;
+END;
+$$;
+RESET ROLE;
+
+-- batch_size <= 0 should be rejected
+SET ROLE regress_user;
+SELECT encrypt.load_key('my-master-passphrase', true);
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.rotate('public', 'test_enc_text', 'ssn', 0);
+        RAISE EXCEPTION 'encrypt.rotate unexpectedly succeeded with batch_size=0';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            RAISE NOTICE 'batch_size=0 rejected as expected';
+    END;
+END;
+$$;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.rotate('public', 'test_enc_text', 'ssn', -1);
+        RAISE EXCEPTION 'encrypt.rotate unexpectedly succeeded with batch_size=-1';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            RAISE NOTICE 'negative batch_size rejected as expected';
+    END;
+END;
+$$;
+RESET ROLE;
+
+-- sample_size <= 0 should be rejected
+SET ROLE regress_user;
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.verify('public', 'test_enc_text', 'ssn', 0);
+        RAISE EXCEPTION 'encrypt.verify unexpectedly succeeded with sample_size=0';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            RAISE NOTICE 'sample_size=0 rejected as expected';
+    END;
+END;
+$$;
+
+DO $$
+BEGIN
+    BEGIN
+        PERFORM encrypt.verify('public', 'test_enc_text', 'ssn', -1);
+        RAISE EXCEPTION 'encrypt.verify unexpectedly succeeded with sample_size=-1';
+    EXCEPTION
+        WHEN invalid_parameter_value THEN
+            RAISE NOTICE 'negative sample_size rejected as expected';
+    END;
+END;
+$$;
+RESET ROLE;
+
+-- =============================================================================
+-- STATUS AND INTROSPECTION
+-- =============================================================================
+
+-- Reload key for status check
+SET ROLE regress_user;
+SELECT encrypt.load_key('my-master-passphrase', true);
+RESET ROLE;
+
+-- Check overall status
+SELECT key_loaded, active_key_version, encrypted_column_count >= 0 AS has_column_count
+FROM encrypt.status();
+
+-- List all keys with their states
+SELECT key_id, key_state, algorithm FROM encrypt.keys() ORDER BY key_id;
+
+-- =============================================================================
+-- UNLOAD KEY
+-- =============================================================================
+
+SET ROLE regress_user;
+SELECT encrypt.unload_key();
+RESET ROLE;
+
+-- Verify key unloaded
+SELECT loaded_cipher_key_versions();
+
+-- Status should show no key loaded
+SELECT key_loaded FROM encrypt.status();
+
+-- =============================================================================
+-- CLEANUP
+-- =============================================================================
+
+DROP TABLE test_enc_text;
+DROP TABLE test_enc_bytea;
+DROP TABLE test_batch_rotate;
+DROP TABLE test_off_mode_text;
+DROP TABLE test_off_mode_bytea;

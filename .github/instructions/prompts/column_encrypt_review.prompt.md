@@ -249,6 +249,41 @@ Pay extra attention to:
 - any memory context transitions involving secrets
 - user-visible errors that might leak sensitive state
 
+### PostgreSQL privilege semantics in this codebase
+
+**Critical**: This extension uses SECURITY DEFINER functions with explicit privilege checks.
+
+| Identity | Meaning | Inside SECURITY DEFINER |
+|----------|---------|------------------------|
+| `session_user` | Login role | Same as outside |
+| `current_user` | Effective role | **Function owner** (not caller!) |
+| `current_setting('role', true)` | SET ROLE value | Caller's SET ROLE value |
+
+**The effective role pattern used here:**
+```sql
+-- COALESCE/NULLIF are SQL constructs, NOT pg_catalog functions.
+-- Do NOT use pg_catalog.COALESCE or pg_catalog.NULLIF - they don't exist!
+v_effective_role := COALESCE(
+    NULLIF(NULLIF(pg_catalog.current_setting('role', true), ''), 'none'),
+    pg_catalog.session_user()
+);
+```
+
+This pattern:
+- Honors `SET ROLE` if the caller used it (privilege reduction)
+- Falls back to `session_user` otherwise (prevents escalation)
+- Is intentional and correct for this codebase
+
+**When reviewing privilege-related code:**
+- Do NOT suggest using `current_user` alone — it's the function owner in SECURITY DEFINER
+- Do NOT suggest using `session_user` alone — it ignores SET ROLE
+- The effective role pattern is the correct approach
+
+**When reviewing tests:**
+- Tables used in `rotate()` or `verify()` tests must be owned by the test role
+- `SET ROLE` tests only work if the code checks the effective role, not session_user
+- Superuser-owned tables don't test privilege enforcement realistically
+
 ## Things you must not do
 
 - Do not invent new architecture unless needed.
