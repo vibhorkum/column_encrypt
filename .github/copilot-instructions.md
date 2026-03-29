@@ -160,8 +160,8 @@ all related issues and present a consolidated final output.
 
 3. **Schema ownership follows PostgreSQL extension semantics**:
    - Control file has `schema = encrypt` with `relocatable = false`
-   - PostgreSQL creates the schema if it doesn't exist during CREATE EXTENSION
-   - Pre-creating the schema externally is allowed but creates ownership nuances
+   - PostgreSQL does **NOT** auto-create the schema with this configuration
+   - The schema **must** be pre-created before `CREATE EXTENSION` (see Schema Creation Model below)
    - Do NOT suggest `CREATE SCHEMA IF NOT EXISTS` inside extension scripts —
      it fails when the schema was pre-created externally
 
@@ -266,6 +266,21 @@ partial findings that may be invalidated by later analysis.
 | `column_encrypt--3.1--3.3.sql` | Upgrade: adds encrypt schema |
 | `sql/column_encrypt.sql` | Regression tests |
 | `expected/column_encrypt.out` | Expected test output |
+
+### Supported Install Paths
+
+**Fresh installs:** Only v3.3 and v4.0 are supported for new installations.
+
+**Upgrades:** Users with existing installations of older versions (1.0, 2.0, 3.0, 3.1) can upgrade
+through the documented upgrade path.
+
+**Legacy scripts (1.0, 2.0, 3.0, 3.1):** These are shipped for upgrade compatibility only. They
+contain hardcoded `public.*` references from an older packaging model. Fresh installs using these
+versions with the current `schema = encrypt` control file are NOT a tested or supported scenario.
+
+**CI upgrade tests:** CI tests the 2.0→3.0 and 3.1→3.3→4.0 upgrade paths to verify that users
+with historical installations can upgrade successfully. This does NOT imply fresh v2.0 installs
+are recommended.
 
 ## Commit Message Format
 

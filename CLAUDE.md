@@ -37,8 +37,16 @@ PostgreSQL must be running with `shared_preload_libraries = 'column_encrypt'` in
 
 - **SQL files** - Extension installation and upgrade scripts:
   - `column_encrypt--4.0.sql` - Clean install (default version)
+  - `column_encrypt--3.3.sql` - Clean install for v3.3 (deprecation release)
   - `column_encrypt--3.1--3.3.sql` - Upgrade: adds `encrypt` schema
   - `column_encrypt--3.3--4.0.sql` - Upgrade: removes deprecated functions
+  - Legacy scripts (1.0, 2.0, 3.0, 3.1) - Shipped for **upgrade compatibility only**
+
+- **Supported install paths**:
+  - Fresh installs: v3.3 or v4.0 only
+  - Upgrades: 2.0→3.0→3.1→3.3→4.0 (CI tests key upgrade paths)
+  - Legacy scripts contain hardcoded `public.*` references from an older model;
+    fresh installs using these versions are NOT supported
 
 ### Security Model
 
